@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QRectF, Qt
+from PyQt5.QtCore import QTimer, QRectF, Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self._current_line_x = np.array([], dtype=np.float64)
         self._current_line_y = np.array([], dtype=np.float64)
         self._line_cursor_locked = False
+        self._selected_cursor_locked = False
         self._heat_cursor_locked = False
         self._heat_row_count = 0
         self._heat_matrix = np.empty((0, 0), dtype=np.float64)
@@ -53,6 +54,14 @@ class MainWindow(QMainWindow):
         self._selected_line_y = np.array([], dtype=np.float64)
         self._axis_controls: dict[str, dict[str, object]] = {}
         self._current_cursor_x = 0.0
+        self.line_baseline_curve = None
+        self.selected_baseline_curve = None
+        self._selected_plot_update_queued = False
+        self._pending_selected_iteration_index: int | None = None
+        self._time_axis_cache = np.array([], dtype=np.float64)
+        self._heat_z_min: float | None = None
+        self._heat_z_max: float | None = None
+        self._heat_max_display_pixels = 2_500_000
 
         # Parameter spinboxes for Ko calculation
         self.pressure_spinbox: QDoubleSpinBox | None = None
@@ -61,6 +70,17 @@ class MainWindow(QMainWindow):
         self.voltage_spinbox: QDoubleSpinBox | None = None
         self.gate_v_multiplier_spinbox: QDoubleSpinBox | None = None
         self.ko_label: QLabel | None = None
+        self.noise_start_spinbox: QDoubleSpinBox | None = None
+        self.noise_end_spinbox: QDoubleSpinBox | None = None
+        self.resolving_power_label: QLabel | None = None
+        self.snr_label: QLabel | None = None
+
+        self._line_peak_region: pg.LinearRegionItem | None = None
+        self._line_fwhm_left: pg.InfiniteLine | None = None
+        self._line_fwhm_right: pg.InfiniteLine | None = None
+        self._selected_peak_region: pg.LinearRegionItem | None = None
+        self._selected_fwhm_left: pg.InfiniteLine | None = None
+        self._selected_fwhm_right: pg.InfiniteLine | None = None
 
         self._build_ui()
         self._refresh_config_label()
@@ -152,7 +172,19 @@ class MainWindow(QMainWindow):
         self.gate_v_multiplier_spinbox.setRange(0.01, 100.0)
         self.gate_v_multiplier_spinbox.setValue(0.5)
         self.gate_v_multiplier_spinbox.setSingleStep(0.01)
-        
+
+        self.noise_start_spinbox = QDoubleSpinBox()
+        self.noise_start_spinbox.setDecimals(3)
+        self.noise_start_spinbox.setRange(0.0, 1e6)
+        self.noise_start_spinbox.setValue(0.0)
+        self.noise_start_spinbox.setSuffix(" ms")
+
+        self.noise_end_spinbox = QDoubleSpinBox()
+        self.noise_end_spinbox.setDecimals(3)
+        self.noise_end_spinbox.setRange(0.0, 1e6)
+        self.noise_end_spinbox.setValue(float(self.config.experiment_length_ms))
+        self.noise_end_spinbox.setSuffix(" ms")
+
         params_layout.addWidget(QLabel("Pressure"), 0, 0)
         params_layout.addWidget(self.pressure_spinbox, 0, 1)
         params_layout.addWidget(QLabel("Temperature"), 1, 0)
@@ -163,14 +195,24 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(self.voltage_spinbox, 3, 1)
         params_layout.addWidget(QLabel("Gate V Multiplier"), 4, 0)
         params_layout.addWidget(self.gate_v_multiplier_spinbox, 4, 1)
+        params_layout.addWidget(QLabel("Noise Start"), 5, 0)
+        params_layout.addWidget(self.noise_start_spinbox, 5, 1)
+        params_layout.addWidget(QLabel("Noise End"), 6, 0)
+        params_layout.addWidget(self.noise_end_spinbox, 6, 1)
         
         control_layout.addWidget(params_box)
 
         readout_box = QGroupBox("Live Readouts")
         readout_layout = QVBoxLayout(readout_box)
         self.ko_label = QLabel("Reduced Mobility (Ko): -- cm²/(V·s)")
+        self.resolving_power_label = QLabel("Resolving Power (td/FWHM): --")
+        self.snr_label = QLabel("SNR: --")
         self.ko_label.setMinimumWidth(395)
+        self.resolving_power_label.setMinimumWidth(395)
+        self.snr_label.setMinimumWidth(395)
         readout_layout.addWidget(self.ko_label)
+        readout_layout.addWidget(self.resolving_power_label)
+        readout_layout.addWidget(self.snr_label)
         
         control_layout.addWidget(readout_box)
         control_layout.addStretch()
@@ -190,10 +232,22 @@ class MainWindow(QMainWindow):
         self.line_plot.setLabel("left", "Signal")
         self.line_plot.setLabel("bottom", "Time (ms)")
         self.line_curve = self.line_plot.plot(pen=pg.mkPen(width=2))
+        self.line_baseline_curve = self.line_plot.plot(pen=pg.mkPen("r", width=3))
         self.line_cursor_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y", width=1))
         self.line_cursor_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("y", width=1))
         self.line_plot.addItem(self.line_cursor_v, ignoreBounds=True)
         self.line_plot.addItem(self.line_cursor_h, ignoreBounds=True)
+        self._line_peak_region = pg.LinearRegionItem(values=(0.0, 0.0), orientation="vertical")
+        self._line_peak_region.setBrush(pg.mkBrush(0, 255, 0, 40))
+        self._line_peak_region.setMovable(False)
+        self._line_fwhm_left = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("c", width=1))
+        self._line_fwhm_right = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("c", width=1))
+        self.line_plot.addItem(self._line_peak_region, ignoreBounds=True)
+        self.line_plot.addItem(self._line_fwhm_left, ignoreBounds=True)
+        self.line_plot.addItem(self._line_fwhm_right, ignoreBounds=True)
+        self._line_peak_region.hide()
+        self._line_fwhm_left.hide()
+        self._line_fwhm_right.hide()
         line_layout.addWidget(self.line_plot)
         self._axis_controls["line"] = self._create_axis_controls(line_layout, "line")
 
@@ -221,7 +275,23 @@ class MainWindow(QMainWindow):
         self.line_plot_from_heat = pg.PlotWidget(title="IMS Signal (Selected from Heatmap)")
         self.line_plot_from_heat.setLabel("left", "Signal")
         self.line_plot_from_heat.setLabel("bottom", "Time (ms)")
-        self.line_curve_from_heat = self.line_plot_from_heat.plot(pen=pg.mkPen("m", width=2))
+        self.line_curve_from_heat = self.line_plot_from_heat.plot(pen=pg.mkPen("w", width=2))
+        self.selected_baseline_curve = self.line_plot_from_heat.plot(pen=pg.mkPen("r", width=3))
+        self.selected_cursor_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y", width=1))
+        self.selected_cursor_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("y", width=1))
+        self.line_plot_from_heat.addItem(self.selected_cursor_v, ignoreBounds=True)
+        self.line_plot_from_heat.addItem(self.selected_cursor_h, ignoreBounds=True)
+        self._selected_peak_region = pg.LinearRegionItem(values=(0.0, 0.0), orientation="vertical")
+        self._selected_peak_region.setBrush(pg.mkBrush(0, 255, 0, 40))
+        self._selected_peak_region.setMovable(False)
+        self._selected_fwhm_left = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("c", width=1))
+        self._selected_fwhm_right = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("c", width=1))
+        self.line_plot_from_heat.addItem(self._selected_peak_region, ignoreBounds=True)
+        self.line_plot_from_heat.addItem(self._selected_fwhm_left, ignoreBounds=True)
+        self.line_plot_from_heat.addItem(self._selected_fwhm_right, ignoreBounds=True)
+        self._selected_peak_region.hide()
+        self._selected_fwhm_left.hide()
+        self._selected_fwhm_right.hide()
         selected_layout.addWidget(self.line_plot_from_heat)
         self._axis_controls["selected"] = self._create_axis_controls(selected_layout, "selected")
 
@@ -240,11 +310,13 @@ class MainWindow(QMainWindow):
         self.btn_load_h5.clicked.connect(self.load_hdf5)
         self.iteration_selector.currentIndexChanged.connect(self.update_line_plot)
 
-        self.pressure_spinbox.valueChanged.connect(self._update_ko)
-        self.temperature_spinbox.valueChanged.connect(self._update_ko)
-        self.length_spinbox.valueChanged.connect(self._update_ko)
-        self.voltage_spinbox.valueChanged.connect(self._update_ko)
-        self.gate_v_multiplier_spinbox.valueChanged.connect(self._update_ko)
+        self.pressure_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.temperature_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.length_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.voltage_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.gate_v_multiplier_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.noise_start_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.noise_end_spinbox.valueChanged.connect(self._on_parameter_changed)
 
         self.line_mouse_proxy = pg.SignalProxy(
             self.line_plot.scene().sigMouseMoved,
@@ -397,10 +469,14 @@ class MainWindow(QMainWindow):
         return x_min, x_max, y_min, y_max
 
     def _heat_z_bounds(self) -> tuple[float, float] | None:
+        if self._heat_z_min is not None and self._heat_z_max is not None:
+            return self._safe_bounds(self._heat_z_min, self._heat_z_max)
         if self._heat_matrix.size == 0:
             return None
         z_min_value = float(np.min(self._heat_matrix))
         z_max_value = float(np.max(self._heat_matrix))
+        self._heat_z_min = z_min_value
+        self._heat_z_max = z_max_value
         return self._safe_bounds(z_min_value, z_max_value)
 
     def _set_axis_spin_values(
@@ -579,6 +655,153 @@ class MainWindow(QMainWindow):
         except (ValueError, ZeroDivisionError):
             self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
 
+    def _active_cursor_locked(self) -> bool:
+        return self._line_cursor_locked or self._heat_cursor_locked or self._selected_cursor_locked
+
+    def _clear_peak_readouts(self) -> None:
+        self.resolving_power_label.setText("Resolving Power (td/FWHM): --")
+        self.snr_label.setText("SNR: --")
+
+    def _hide_peak_overlays(self, source: str | None = None) -> None:
+        if source in (None, "line"):
+            self._line_peak_region.hide()
+            self._line_fwhm_left.hide()
+            self._line_fwhm_right.hide()
+        if source in (None, "selected"):
+            self._selected_peak_region.hide()
+            self._selected_fwhm_left.hide()
+            self._selected_fwhm_right.hide()
+
+    def _on_parameter_changed(self, _value: float | None = None) -> None:
+        self._update_baseline_overlay("line")
+        self._update_baseline_overlay("selected")
+        if self._active_cursor_locked():
+            self._update_ko()
+            if self._line_cursor_locked:
+                self._update_peak_metrics(self._current_line_x, self._current_line_y, self._current_cursor_x, "line")
+            elif self._selected_cursor_locked:
+                self._update_peak_metrics(
+                    self._selected_line_x,
+                    self._selected_line_y,
+                    self._current_cursor_x,
+                    "selected",
+                )
+
+    def _baseline_bounds(self, source: str) -> tuple[float, float]:
+        del source
+        return self._safe_bounds(self.noise_start_spinbox.value(), self.noise_end_spinbox.value())
+
+    def _update_baseline_overlay(self, source: str) -> None:
+        if source == "line":
+            x_values = self._current_line_x
+            y_values = self._current_line_y
+            baseline_curve = self.line_baseline_curve
+        else:
+            x_values = self._selected_line_x
+            y_values = self._selected_line_y
+            baseline_curve = self.selected_baseline_curve
+
+        if baseline_curve is None or x_values.size == 0 or y_values.size == 0:
+            if baseline_curve is not None:
+                baseline_curve.setData([], [])
+            return
+
+        low_bound, high_bound = self._baseline_bounds(source)
+        baseline_mask = (x_values >= low_bound) & (x_values <= high_bound)
+
+        baseline_y = np.full(y_values.shape, np.nan, dtype=np.float64)
+        baseline_y[baseline_mask] = y_values[baseline_mask]
+        baseline_curve.setData(x_values, baseline_y)
+
+    def _interpolate_x(self, x1: float, y1: float, x2: float, y2: float, target_y: float) -> float:
+        if y2 == y1:
+            return x1
+        return x1 + (target_y - y1) * (x2 - x1) / (y2 - y1)
+
+    def _update_peak_metrics(self, x: np.ndarray, y: np.ndarray, cursor_x: float, source: str) -> None:
+        if x.size == 0 or y.size == 0:
+            self._clear_peak_readouts()
+            self._hide_peak_overlays(source)
+            return
+
+        peak_idx = int(np.argmin(np.abs(x - cursor_x)))
+        peak_signal = float(y[peak_idx])
+        if peak_signal <= 0.0:
+            self._clear_peak_readouts()
+            self._hide_peak_overlays(source)
+            return
+
+        peak_time_ms = float(x[peak_idx])
+        half_max = peak_signal * 0.5
+
+        left_idx = peak_idx
+        while left_idx > 0 and y[left_idx] > half_max:
+            left_idx -= 1
+        right_idx = peak_idx
+        while right_idx < y.size - 1 and y[right_idx] > half_max:
+            right_idx += 1
+
+        if left_idx == peak_idx or right_idx == peak_idx:
+            self._clear_peak_readouts()
+            self._hide_peak_overlays(source)
+            return
+
+        left_x = self._interpolate_x(
+            float(x[left_idx]),
+            float(y[left_idx]),
+            float(x[left_idx + 1]),
+            float(y[left_idx + 1]),
+            half_max,
+        )
+        right_x = self._interpolate_x(
+            float(x[right_idx - 1]),
+            float(y[right_idx - 1]),
+            float(x[right_idx]),
+            float(y[right_idx]),
+            half_max,
+        )
+
+        fwhm_ms = right_x - left_x
+        if fwhm_ms <= 0.0:
+            self._clear_peak_readouts()
+            self._hide_peak_overlays(source)
+            return
+
+        resolving_power = peak_time_ms / fwhm_ms
+
+        noise_low, noise_high = self._baseline_bounds(source)
+        noise_mask = (x >= noise_low) & (x <= noise_high)
+        noise_values = y[noise_mask]
+        snr_text = "SNR: --"
+        if noise_values.size >= 2:
+            noise_mean = float(np.mean(noise_values))
+            noise_rms = float(np.sqrt(np.mean((noise_values - noise_mean) ** 2)))
+            signal_height = max(peak_signal - noise_mean, 0.0)
+            if noise_rms > 0.0 and signal_height > 0.0:
+                snr_linear = signal_height / noise_rms
+                snr_db = 20.0 * np.log10(snr_linear)
+                snr_text = f"SNR: {snr_linear:.2f} ({snr_db:.2f} dB)"
+
+        self.resolving_power_label.setText(
+            f"Resolving Power (td/FWHM): {resolving_power:.3f} | td={peak_time_ms:.4f} ms, FWHM={fwhm_ms:.4f} ms"
+        )
+        self.snr_label.setText(snr_text)
+
+        if source == "line":
+            self._line_peak_region.setRegion((float(x[left_idx]), float(x[right_idx])))
+            self._line_fwhm_left.setPos(left_x)
+            self._line_fwhm_right.setPos(right_x)
+            self._line_peak_region.show()
+            self._line_fwhm_left.show()
+            self._line_fwhm_right.show()
+        elif source == "selected":
+            self._selected_peak_region.setRegion((float(x[left_idx]), float(x[right_idx])))
+            self._selected_fwhm_left.setPos(left_x)
+            self._selected_fwhm_right.setPos(right_x)
+            self._selected_peak_region.show()
+            self._selected_fwhm_left.show()
+            self._selected_fwhm_right.show()
+
     def _refresh_config_label(self) -> None:
         cfg = self.config
         text = (
@@ -656,57 +879,86 @@ class MainWindow(QMainWindow):
         self.iteration_selector.blockSignals(False)
         self.update_line_plot()
 
-    def _append_iteration_selector(self, iteration: int) -> None:
+    def _append_iteration_selector(self, iteration: int, refresh_plot: bool = True) -> None:
         previous_count = self.iteration_selector.count()
         was_showing_latest = previous_count == 0 or self.iteration_selector.currentIndex() == (previous_count - 1)
 
         self.iteration_selector.blockSignals(True)
-        self.iteration_selector.addItem(str(iteration))
+        for value in range(previous_count + 1, iteration + 1):
+            self.iteration_selector.addItem(str(value))
         if was_showing_latest:
             self.iteration_selector.setCurrentIndex(self.iteration_selector.count() - 1)
         self.iteration_selector.blockSignals(False)
 
-        if was_showing_latest:
+        if was_showing_latest and refresh_plot:
             self.update_line_plot()
+
+    def _time_axis(self, point_count: int) -> np.ndarray:
+        if self._time_axis_cache.size != point_count:
+            max_time_ms = float(self.config.experiment_length_ms)
+            self._time_axis_cache = np.linspace(0.0, max_time_ms, point_count, endpoint=True)
+        return self._time_axis_cache
 
     def update_line_plot(self) -> None:
         if self.experiment_data.iteration_count() == 0:
             self.line_curve.setData([], [])
             self.line_curve_from_heat.setData([], [])
+            self.line_baseline_curve.setData([], [])
+            self.selected_baseline_curve.setData([], [])
             self._current_line_x = np.array([], dtype=np.float64)
             self._current_line_y = np.array([], dtype=np.float64)
             self._selected_line_x = np.array([], dtype=np.float64)
             self._selected_line_y = np.array([], dtype=np.float64)
             self._line_cursor_locked = False
+            self._selected_cursor_locked = False
             self.line_cursor_label.setText("Line cursor: x=-- ms, y=--")
+            self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+            self._clear_peak_readouts()
+            self._hide_peak_overlays()
             return
 
         idx = max(0, self.iteration_selector.currentIndex())
         idx = min(idx, self.experiment_data.iteration_count() - 1)
         y = self.experiment_data.get_iteration(idx)
-        max_time_ms = float(self.config.experiment_length_ms)
-        x = np.linspace(0.0, max_time_ms, y.shape[0], endpoint=True)
+        x = self._time_axis(y.shape[0])
         self._current_line_x = x
         self._current_line_y = y
         self.line_curve.setData(x, y)
+        self._update_baseline_overlay("line")
         self._update_auto_axis("line")
 
     def _set_secondary_line_plot(self, iteration_index: int) -> None:
         if self.experiment_data.iteration_count() == 0:
             self.line_curve_from_heat.setData([], [])
+            self.selected_baseline_curve.setData([], [])
             return
 
         bounded_index = int(np.clip(iteration_index, 0, self.experiment_data.iteration_count() - 1))
         y = self.experiment_data.get_iteration(bounded_index)
-        max_time_ms = float(self.config.experiment_length_ms)
-        x = np.linspace(0.0, max_time_ms, y.shape[0], endpoint=True)
+        x = self._time_axis(y.shape[0])
         self._selected_line_x = x
         self._selected_line_y = y
         self.line_curve_from_heat.setData(x, y)
+        self._update_baseline_overlay("selected")
         self._update_auto_axis("selected")
         self.line_plot_from_heat.setTitle(
             f"IMS Signal (Selected from Heatmap) - Iteration {bounded_index + 1}"
         )
+
+    def _queue_selected_line_plot_update(self, iteration_index: int) -> None:
+        self._pending_selected_iteration_index = int(iteration_index)
+        if self._selected_plot_update_queued:
+            return
+        self._selected_plot_update_queued = True
+        QTimer.singleShot(0, self._flush_selected_line_plot_update)
+
+    def _flush_selected_line_plot_update(self) -> None:
+        self._selected_plot_update_queued = False
+        if self._pending_selected_iteration_index is None:
+            return
+        pending_index = self._pending_selected_iteration_index
+        self._pending_selected_iteration_index = None
+        self._set_secondary_line_plot(pending_index)
 
     def update_heatmap(self, force_levels: bool = False) -> None:
         matrix = self.experiment_data.all_iterations_matrix()
@@ -722,7 +974,15 @@ class MainWindow(QMainWindow):
             return
 
         auto_levels = force_levels or not self._heat_levels_initialized
-        self.heat_img.setImage(matrix.T, autoLevels=auto_levels, axisOrder="row-major")
+        point_count = matrix.shape[1]
+        display_stride = 1
+        if self._heat_row_count > 0 and point_count > 0:
+            total_pixels = self._heat_row_count * point_count
+            if total_pixels > self._heat_max_display_pixels:
+                display_stride = int(np.ceil(total_pixels / self._heat_max_display_pixels))
+
+        matrix_for_display = matrix[:, ::display_stride]
+        self.heat_img.setImage(matrix_for_display.T, autoLevels=auto_levels, axisOrder="row-major")
 
         max_time_ms = float(self.config.experiment_length_ms)
         row_count = matrix.shape[0]
@@ -757,9 +1017,6 @@ class MainWindow(QMainWindow):
         self.line_cursor_h.setPos(y_val)
         status = " [LOCKED]" if self._line_cursor_locked else ""
         self.line_cursor_label.setText(f"Line cursor: x={x_val:.4f} ms, y={y_val:.6f}{status}")
-        
-        self._current_cursor_x = x_val
-        self._update_ko()
 
     def _on_line_mouse_clicked(self, event) -> None:
         if self._current_line_x.size == 0:
@@ -771,7 +1028,26 @@ class MainWindow(QMainWindow):
         if not self.line_plot.plotItem.vb.sceneBoundingRect().contains(mouse_event.scenePos()):
             return
 
+        mouse_point = self.line_plot.plotItem.vb.mapSceneToView(mouse_event.scenePos())
+        mouse_x = float(mouse_point.x())
+        nearest_idx = int(np.argmin(np.abs(self._current_line_x - mouse_x)))
+        x_val = float(self._current_line_x[nearest_idx])
+        y_val = float(self._current_line_y[nearest_idx])
+
         self._line_cursor_locked = not self._line_cursor_locked
+        if self._line_cursor_locked:
+            self._selected_cursor_locked = False
+            self._current_cursor_x = x_val
+            self.line_cursor_v.setPos(x_val)
+            self.line_cursor_h.setPos(y_val)
+            self._update_ko()
+            self._update_peak_metrics(self._current_line_x, self._current_line_y, x_val, "line")
+        else:
+            self._hide_peak_overlays("line")
+            if not self._active_cursor_locked():
+                self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+                self._clear_peak_readouts()
+
         base_text = self.line_cursor_label.text().split(" [")[0]
         suffix = " [LOCKED]" if self._line_cursor_locked else ""
         self.line_cursor_label.setText(base_text + suffix)
@@ -807,9 +1083,6 @@ class MainWindow(QMainWindow):
             z_value=z_val,
             locked=self._heat_cursor_locked,
         )
-        
-        self._current_cursor_x = y_val
-        self._update_ko()
 
     def _on_heat_mouse_clicked(self, event) -> None:
         if self._heat_row_count == 0:
@@ -834,19 +1107,29 @@ class MainWindow(QMainWindow):
         z_val = float(self._heat_matrix[iter_idx, point_idx])
 
         if self._heat_cursor_locked:
+            self._line_cursor_locked = False
+            self._selected_cursor_locked = False
             self._selected_heat_iteration_index = selected_iter_idx
-            self._set_secondary_line_plot(selected_iter_idx)
+            self._queue_selected_line_plot_update(selected_iter_idx)
             self._set_heat_cursor_label(x_iter=x_val, y_ms=y_val, z_value=z_val, locked=True)
             self._current_cursor_x = y_val
             self._update_ko()
+            self._clear_peak_readouts()
+            self._hide_peak_overlays()
             return
 
         self.heat_cursor_v.setPos(x_val)
         self.heat_cursor_h.setPos(y_val)
         self._set_heat_cursor_label(x_iter=x_val, y_ms=y_val, z_value=z_val, locked=False)
+        if not self._active_cursor_locked():
+            self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+            self._clear_peak_readouts()
+            self._hide_peak_overlays()
 
     def _on_selected_mouse_moved(self, event) -> None:
         """Handle mouse movement on the Selected Iteration plot."""
+        if self._selected_cursor_locked:
+            return
         if self._selected_line_x.size == 0:
             return
 
@@ -859,13 +1142,40 @@ class MainWindow(QMainWindow):
 
         nearest_idx = int(np.argmin(np.abs(self._selected_line_x - mouse_x)))
         x_val = float(self._selected_line_x[nearest_idx])
-        
-        self._current_cursor_x = x_val
-        self._update_ko()
+        y_val = float(self._selected_line_y[nearest_idx])
+        self.selected_cursor_v.setPos(x_val)
+        self.selected_cursor_h.setPos(y_val)
 
     def _on_selected_mouse_clicked(self, event) -> None:
-        """Handle mouse clicks on the Selected Iteration plot (placeholder for future use)."""
-        pass
+        if self._selected_line_x.size == 0:
+            return
+
+        mouse_event = event[0] if isinstance(event, tuple) else event
+        if mouse_event.button() != Qt.LeftButton:
+            return
+        if not self.line_plot_from_heat.plotItem.vb.sceneBoundingRect().contains(mouse_event.scenePos()):
+            return
+
+        mouse_point = self.line_plot_from_heat.plotItem.vb.mapSceneToView(mouse_event.scenePos())
+        mouse_x = float(mouse_point.x())
+        nearest_idx = int(np.argmin(np.abs(self._selected_line_x - mouse_x)))
+        x_val = float(self._selected_line_x[nearest_idx])
+        y_val = float(self._selected_line_y[nearest_idx])
+
+        self._selected_cursor_locked = not self._selected_cursor_locked
+        if self._selected_cursor_locked:
+            self._line_cursor_locked = False
+            self._heat_cursor_locked = False
+            self._current_cursor_x = x_val
+            self.selected_cursor_v.setPos(x_val)
+            self.selected_cursor_h.setPos(y_val)
+            self._update_ko()
+            self._update_peak_metrics(self._selected_line_x, self._selected_line_y, x_val, "selected")
+        else:
+            self._hide_peak_overlays("selected")
+            if not self._active_cursor_locked():
+                self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+                self._clear_peak_readouts()
 
     def edit_settings(self) -> None:
         dlg = ExperimentConfigDialog(self.config, self)
@@ -886,6 +1196,9 @@ class MainWindow(QMainWindow):
 
         self.experiment_data.reset(self.config)
         self._selected_heat_iteration_index = None
+        self._time_axis_cache = np.array([], dtype=np.float64)
+        self._heat_z_min = None
+        self._heat_z_max = None
         self._refresh_iteration_selector()
         self.update_heatmap(force_levels=True)
 
@@ -916,20 +1229,35 @@ class MainWindow(QMainWindow):
 
     def on_iteration_ready(self, iteration: int, y: np.ndarray) -> None:
         self.experiment_data.add_iteration(y)
-        self._append_iteration_selector(iteration)
-
         if iteration < 200:
             refresh_every = 5
         elif iteration < 1000:
             refresh_every = 20
-        else:
+        elif iteration < 3000:
             refresh_every = 50
-        if iteration % refresh_every == 0 or iteration == self.config.total_iterations:
+        else:
+            refresh_every = 100
+
+        should_refresh_plots = iteration % refresh_every == 0 or iteration == self.config.total_iterations
+        should_refresh_selector = should_refresh_plots or iteration == 1
+        if should_refresh_selector:
+            self._append_iteration_selector(iteration, refresh_plot=should_refresh_plots)
+
+        y_min = float(np.min(y))
+        y_max = float(np.max(y))
+        if self._heat_z_min is None or y_min < self._heat_z_min:
+            self._heat_z_min = y_min
+        if self._heat_z_max is None or y_max > self._heat_z_max:
+            self._heat_z_max = y_max
+
+        if should_refresh_plots:
             self.update_heatmap()
 
         self.status_label.setText(f"Status: Iteration {iteration} complete")
 
     def on_finished(self) -> None:
+        self._append_iteration_selector(self.experiment_data.iteration_count(), refresh_plot=False)
+        self.update_line_plot()
         self.update_heatmap()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -966,6 +1294,14 @@ class MainWindow(QMainWindow):
         self.config = loaded.config
         self.experiment_data = loaded
         self._selected_heat_iteration_index = None
+        self._time_axis_cache = np.array([], dtype=np.float64)
+        loaded_matrix = self.experiment_data.all_iterations_matrix()
+        if loaded_matrix.size > 0:
+            self._heat_z_min = float(np.min(loaded_matrix))
+            self._heat_z_max = float(np.max(loaded_matrix))
+        else:
+            self._heat_z_min = None
+            self._heat_z_max = None
         self._refresh_config_label()
         self._refresh_iteration_selector()
         self.update_heatmap(force_levels=True)
