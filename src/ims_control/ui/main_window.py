@@ -559,7 +559,7 @@ class MainWindow(QMainWindow):
         pressure = self.pressure_spinbox.value()  # Torr
         temperature = self.temperature_spinbox.value()  # °C
         length = self.length_spinbox.value()  # cm
-        voltage = self.voltage_spinbox.value()  # kV
+        voltage = self.voltage_spinbox.value() * 1000.0  # Convert from kV to V
         gate_v_multiplier = self.gate_v_multiplier_spinbox.value()
         
         # Convert drift time from ms to seconds
