@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.h5
+*.hdf5
+*.csv
+!sample_data/*.csv

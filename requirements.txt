@@ -1,0 +1,6 @@
+PyQt5>=5.15
+pyqtgraph>=0.13
+numpy>=1.26
+h5py>=3.10
+pandas>=2.2
+nidaqmx>=0.10
