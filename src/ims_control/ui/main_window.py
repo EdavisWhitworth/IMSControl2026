@@ -52,6 +52,15 @@ class MainWindow(QMainWindow):
         self._selected_line_x = np.array([], dtype=np.float64)
         self._selected_line_y = np.array([], dtype=np.float64)
         self._axis_controls: dict[str, dict[str, object]] = {}
+        self._current_cursor_x = 0.0
+
+        # Parameter spinboxes for Ko calculation
+        self.pressure_spinbox: QDoubleSpinBox | None = None
+        self.temperature_spinbox: QDoubleSpinBox | None = None
+        self.length_spinbox: QDoubleSpinBox | None = None
+        self.voltage_spinbox: QDoubleSpinBox | None = None
+        self.gate_v_multiplier_spinbox: QDoubleSpinBox | None = None
+        self.ko_label: QLabel | None = None
 
         self._build_ui()
         self._refresh_config_label()
@@ -106,6 +115,64 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.progress_label)
         control_layout.addWidget(self.line_cursor_label)
         control_layout.addWidget(self.heat_cursor_label)
+
+        params_box = QGroupBox("Parameters")
+        params_layout = QGridLayout(params_box)
+        
+        self.pressure_spinbox = QDoubleSpinBox()
+        self.pressure_spinbox.setDecimals(2)
+        self.pressure_spinbox.setRange(0.0, 10000.0)
+        self.pressure_spinbox.setValue(705.0)
+        self.pressure_spinbox.setSingleStep(1.0)
+        self.pressure_spinbox.setSuffix(" Torr")
+        
+        self.temperature_spinbox = QDoubleSpinBox()
+        self.temperature_spinbox.setDecimals(1)
+        self.temperature_spinbox.setRange(-273.15, 1000.0)
+        self.temperature_spinbox.setValue(20.0)
+        self.temperature_spinbox.setSingleStep(0.1)
+        self.temperature_spinbox.setSuffix(" °C")
+        
+        self.length_spinbox = QDoubleSpinBox()
+        self.length_spinbox.setDecimals(2)
+        self.length_spinbox.setRange(0.1, 1000.0)
+        self.length_spinbox.setValue(10.0)
+        self.length_spinbox.setSingleStep(0.1)
+        self.length_spinbox.setSuffix(" cm")
+        
+        self.voltage_spinbox = QDoubleSpinBox()
+        self.voltage_spinbox.setDecimals(2)
+        self.voltage_spinbox.setRange(0.1, 100.0)
+        self.voltage_spinbox.setValue(4.0)
+        self.voltage_spinbox.setSingleStep(0.1)
+        self.voltage_spinbox.setSuffix(" kV")
+        
+        self.gate_v_multiplier_spinbox = QDoubleSpinBox()
+        self.gate_v_multiplier_spinbox.setDecimals(2)
+        self.gate_v_multiplier_spinbox.setRange(0.01, 100.0)
+        self.gate_v_multiplier_spinbox.setValue(0.5)
+        self.gate_v_multiplier_spinbox.setSingleStep(0.01)
+        
+        params_layout.addWidget(QLabel("Pressure"), 0, 0)
+        params_layout.addWidget(self.pressure_spinbox, 0, 1)
+        params_layout.addWidget(QLabel("Temperature"), 1, 0)
+        params_layout.addWidget(self.temperature_spinbox, 1, 1)
+        params_layout.addWidget(QLabel("Length"), 2, 0)
+        params_layout.addWidget(self.length_spinbox, 2, 1)
+        params_layout.addWidget(QLabel("Voltage"), 3, 0)
+        params_layout.addWidget(self.voltage_spinbox, 3, 1)
+        params_layout.addWidget(QLabel("Gate V Multiplier"), 4, 0)
+        params_layout.addWidget(self.gate_v_multiplier_spinbox, 4, 1)
+        
+        control_layout.addWidget(params_box)
+
+        readout_box = QGroupBox("Live Readouts")
+        readout_layout = QVBoxLayout(readout_box)
+        self.ko_label = QLabel("Reduced Mobility (Ko): -- cm²/(V·s)")
+        self.ko_label.setMinimumWidth(395)
+        readout_layout.addWidget(self.ko_label)
+        
+        control_layout.addWidget(readout_box)
         control_layout.addStretch()
 
         plot_tabs = QTabWidget()
@@ -173,6 +240,12 @@ class MainWindow(QMainWindow):
         self.btn_load_h5.clicked.connect(self.load_hdf5)
         self.iteration_selector.currentIndexChanged.connect(self.update_line_plot)
 
+        self.pressure_spinbox.valueChanged.connect(self._update_ko)
+        self.temperature_spinbox.valueChanged.connect(self._update_ko)
+        self.length_spinbox.valueChanged.connect(self._update_ko)
+        self.voltage_spinbox.valueChanged.connect(self._update_ko)
+        self.gate_v_multiplier_spinbox.valueChanged.connect(self._update_ko)
+
         self.line_mouse_proxy = pg.SignalProxy(
             self.line_plot.scene().sigMouseMoved,
             rateLimit=60,
@@ -185,6 +258,13 @@ class MainWindow(QMainWindow):
             slot=self._on_heat_mouse_moved,
         )
         self.heat_plot.scene().sigMouseClicked.connect(self._on_heat_mouse_clicked)
+
+        self.selected_mouse_proxy = pg.SignalProxy(
+            self.line_plot_from_heat.scene().sigMouseMoved,
+            rateLimit=60,
+            slot=self._on_selected_mouse_moved,
+        )
+        self.line_plot_from_heat.scene().sigMouseClicked.connect(self._on_selected_mouse_clicked)
 
         self._on_auto_axis_toggled("line")
         self._on_auto_axis_toggled("heat")
@@ -465,6 +545,40 @@ class MainWindow(QMainWindow):
         self.heat_img.setLookupTable(lut)
         self.heat_lut.gradient.setColorMap(rainbow_cmap)
 
+    def _update_ko(self) -> None:
+        """Calculate and update the reduced mobility (Ko) value."""
+        if self.ko_label is None:
+            return
+        
+        drift_time_ms = self._current_cursor_x
+        if drift_time_ms <= 0:
+            self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+            return
+        
+        # Get parameter values
+        pressure = self.pressure_spinbox.value()  # Torr
+        temperature = self.temperature_spinbox.value()  # °C
+        length = self.length_spinbox.value()  # cm
+        voltage = self.voltage_spinbox.value()  # kV
+        gate_v_multiplier = self.gate_v_multiplier_spinbox.value()
+        
+        # Convert drift time from ms to seconds
+        drift_time_sec = drift_time_ms / 1000.0
+        
+        # Calculate Ko using the formula:
+        # Ko = ((L^2)/(V*(Gate V Multiplier)*Drift Time (in seconds)))*(P/760)*(273.15/(T+273.15))
+        try:
+            numerator = length * length
+            denominator = voltage * gate_v_multiplier * drift_time_sec
+            pressure_factor = pressure / 760.0
+            temperature_factor = 273.15 / (temperature + 273.15)
+            
+            ko = (numerator / denominator) * pressure_factor * temperature_factor
+            
+            self.ko_label.setText(f"Reduced Mobility (Ko): {ko:.4f} cm²/(V·s)")
+        except (ValueError, ZeroDivisionError):
+            self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+
     def _refresh_config_label(self) -> None:
         cfg = self.config
         text = (
@@ -643,6 +757,9 @@ class MainWindow(QMainWindow):
         self.line_cursor_h.setPos(y_val)
         status = " [LOCKED]" if self._line_cursor_locked else ""
         self.line_cursor_label.setText(f"Line cursor: x={x_val:.4f} ms, y={y_val:.6f}{status}")
+        
+        self._current_cursor_x = x_val
+        self._update_ko()
 
     def _on_line_mouse_clicked(self, event) -> None:
         if self._current_line_x.size == 0:
@@ -690,6 +807,9 @@ class MainWindow(QMainWindow):
             z_value=z_val,
             locked=self._heat_cursor_locked,
         )
+        
+        self._current_cursor_x = y_val
+        self._update_ko()
 
     def _on_heat_mouse_clicked(self, event) -> None:
         if self._heat_row_count == 0:
@@ -717,11 +837,35 @@ class MainWindow(QMainWindow):
             self._selected_heat_iteration_index = selected_iter_idx
             self._set_secondary_line_plot(selected_iter_idx)
             self._set_heat_cursor_label(x_iter=x_val, y_ms=y_val, z_value=z_val, locked=True)
+            self._current_cursor_x = y_val
+            self._update_ko()
             return
 
         self.heat_cursor_v.setPos(x_val)
         self.heat_cursor_h.setPos(y_val)
         self._set_heat_cursor_label(x_iter=x_val, y_ms=y_val, z_value=z_val, locked=False)
+
+    def _on_selected_mouse_moved(self, event) -> None:
+        """Handle mouse movement on the Selected Iteration plot."""
+        if self._selected_line_x.size == 0:
+            return
+
+        pos = event[0]
+        if not self.line_plot_from_heat.sceneBoundingRect().contains(pos):
+            return
+
+        mouse_point = self.line_plot_from_heat.plotItem.vb.mapSceneToView(pos)
+        mouse_x = float(mouse_point.x())
+
+        nearest_idx = int(np.argmin(np.abs(self._selected_line_x - mouse_x)))
+        x_val = float(self._selected_line_x[nearest_idx])
+        
+        self._current_cursor_x = x_val
+        self._update_ko()
+
+    def _on_selected_mouse_clicked(self, event) -> None:
+        """Handle mouse clicks on the Selected Iteration plot (placeholder for future use)."""
+        pass
 
     def edit_settings(self) -> None:
         dlg = ExperimentConfigDialog(self.config, self)
