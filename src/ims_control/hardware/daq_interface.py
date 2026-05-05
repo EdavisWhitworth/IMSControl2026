@@ -338,7 +338,7 @@ class NiUSB6351Controller:
         try:
             with nidaqmx.Task() as ao_task:
                 ao_task.ao_channels.add_ao_voltage_chan(text)
-                ao_task.write(float(voltage), auto_start=True)
+                ao_task.write(float(voltage), auto_start=True, timeout=1.0)
         except Exception as exc:
             raise RuntimeError(f"Failed AO write on '{text}': {exc}") from exc
 
@@ -356,6 +356,6 @@ class NiUSB6351Controller:
         try:
             with nidaqmx.Task() as do_task:
                 do_task.do_channels.add_do_chan(text, line_grouping=LineGrouping.CHAN_PER_LINE)
-                do_task.write(bool(state), auto_start=True)
+                do_task.write(bool(state), auto_start=True, timeout=1.0)
         except Exception as exc:
             raise RuntimeError(f"Failed DO write on '{text}': {exc}") from exc

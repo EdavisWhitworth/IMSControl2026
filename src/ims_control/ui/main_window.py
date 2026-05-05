@@ -79,9 +79,13 @@ class MainWindow(QMainWindow):
         self.hv_config = self._load_default_hv_config()
         self.hv_enabled = False
         self.hv_worker: HVOutputWorker | None = None
+        self.hv_operation_timed_out = False
         self._pending_hv_enabled = False
         self._pending_hv_ims_v = 0.0
         self._pending_hv_ion_v = 0.0
+        self.hv_watchdog = QTimer(self)
+        self.hv_watchdog.setSingleShot(True)
+        self.hv_watchdog.timeout.connect(self._on_hv_apply_timeout)
         self.experiment_data = ExperimentData(self.config)
         self.worker: AcquisitionWorker | None = None
         self._heat_levels_initialized = False
@@ -978,10 +982,12 @@ class MainWindow(QMainWindow):
         self._pending_hv_enabled = bool(enabled)
         self._pending_hv_ims_v = float(ims_v)
         self._pending_hv_ion_v = float(ion_v)
+        self.hv_operation_timed_out = False
 
         self.btn_hv_enable.setEnabled(False)
         self.btn_hv_settings.setEnabled(False)
         self.status_label.setText("Status: Applying HV outputs...")
+        self.hv_watchdog.start(2500)
 
         self.hv_worker = HVOutputWorker(
             daq_config=daq_cfg,
@@ -998,6 +1004,8 @@ class MainWindow(QMainWindow):
         self.hv_worker.start()
 
     def _on_hv_apply_success(self, enabled: bool, ims_v: float, ion_v: float) -> None:
+        if self.hv_operation_timed_out:
+            return
         self.hv_enabled = bool(enabled)
         self.btn_hv_enable.blockSignals(True)
         self.btn_hv_enable.setChecked(self.hv_enabled)
@@ -1017,6 +1025,8 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: HV disabled")
 
     def _on_hv_apply_failed(self, message: str) -> None:
+        if self.hv_operation_timed_out:
+            return
         self.hv_enabled = False
         self.btn_hv_enable.blockSignals(True)
         self.btn_hv_enable.setChecked(False)
@@ -1027,9 +1037,27 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "HV output error", message)
 
     def _on_hv_apply_finished(self) -> None:
+        self.hv_watchdog.stop()
         self.btn_hv_enable.setEnabled(True)
         self.btn_hv_settings.setEnabled(True)
         self.hv_worker = None
+
+    def _on_hv_apply_timeout(self) -> None:
+        if self.hv_worker is None or not self.hv_worker.isRunning():
+            return
+        self.hv_operation_timed_out = True
+        self.btn_hv_enable.setEnabled(True)
+        self.btn_hv_settings.setEnabled(True)
+        self.btn_hv_enable.blockSignals(True)
+        self.btn_hv_enable.setChecked(self.hv_enabled)
+        self.btn_hv_enable.setText("HV ON" if self.hv_enabled else "HV OFF")
+        self.btn_hv_enable.blockSignals(False)
+        self.status_label.setText("Status: HV control timeout; check channels/wiring")
+        QMessageBox.warning(
+            self,
+            "HV timeout",
+            "HV control command timed out. Controls were re-enabled so the app remains responsive.",
+        )
 
     def _load_default_hv_config(self) -> HVPowerConfig:
         path = self.DEFAULT_HV_CONFIG_PATH
@@ -1606,5 +1634,9 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             self.worker.request_stop()
             self.worker.wait(3000)
-        self._set_hv_outputs(enabled=False, silent=True)
+        self.hv_watchdog.stop()
+        if self.hv_worker is not None and self.hv_worker.isRunning():
+            self.hv_worker.requestInterruption()
+            self.hv_worker.quit()
+            self.hv_worker.wait(200)
         event.accept()
