@@ -24,6 +24,34 @@ class ExperimentConfig:
         return asdict(self)
 
 
+@dataclass
+class HVPowerConfig:
+    ims_ao_channel: str = "Dev1/ao0"
+    ion_ao_channel: str = "Dev1/ao1"
+    hv_enable_do_line: str = "Dev1/port0/line0"
+    ims_max_output_kv: float = 20.0
+    control_voltage_max_v: float = 10.0
+    ims_setpoint_kv: float = 10.0
+    ionization_bias_kv: float = 0.0
+    save_as_default: bool = False
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, object]) -> "HVPowerConfig":
+        return cls(
+            ims_ao_channel=str(raw.get("ims_ao_channel", "Dev1/ao0")),
+            ion_ao_channel=str(raw.get("ion_ao_channel", "Dev1/ao1")),
+            hv_enable_do_line=str(raw.get("hv_enable_do_line", "Dev1/port0/line0")),
+            ims_max_output_kv=float(raw.get("ims_max_output_kv", 20.0)),
+            control_voltage_max_v=float(raw.get("control_voltage_max_v", 10.0)),
+            ims_setpoint_kv=float(raw.get("ims_setpoint_kv", 10.0)),
+            ionization_bias_kv=float(raw.get("ionization_bias_kv", 0.0)),
+            save_as_default=bool(raw.get("save_as_default", False)),
+        )
+
+
 class ExperimentData:
     def __init__(self, config: ExperimentConfig) -> None:
         self.config = config

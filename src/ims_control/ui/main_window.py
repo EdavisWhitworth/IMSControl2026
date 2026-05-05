@@ -25,13 +25,16 @@ from PyQt5.QtWidgets import (
 )
 
 from ims_control.acquisition.worker_thread import AcquisitionWorker
-from ims_control.data_model.experiment import ExperimentConfig, ExperimentData
+from ims_control.data_model.experiment import ExperimentConfig, ExperimentData, HVPowerConfig
+from ims_control.hardware.daq_interface import DaqConfig, NiUSB6351Controller
 from ims_control.io.export_import import ExperimentExporter, ExperimentImporter
 from ims_control.ui.config_dialog import ExperimentConfigDialog
+from ims_control.ui.hv_config_dialog import HVConfigDialog
 
 
 class MainWindow(QMainWindow):
     DEFAULT_CONFIG_PATH = Path.home() / ".ims_control_defaults.json"
+    DEFAULT_HV_CONFIG_PATH = Path.home() / ".ims_control_hv_defaults.json"
 
     def __init__(self) -> None:
         super().__init__()
@@ -39,6 +42,8 @@ class MainWindow(QMainWindow):
         self.resize(1200, 780)
 
         self.config = self._load_default_config()
+        self.hv_config = self._load_default_hv_config()
+        self.hv_enabled = False
         self.experiment_data = ExperimentData(self.config)
         self.worker: AcquisitionWorker | None = None
         self._heat_levels_initialized = False
@@ -84,6 +89,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._refresh_config_label()
+        self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+        self._apply_hv_background(False)
+        self._set_hv_outputs(enabled=False, silent=True)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -100,10 +108,15 @@ class MainWindow(QMainWindow):
 
         row1 = QHBoxLayout()
         self.btn_edit = QPushButton("Edit Settings")
+        self.btn_hv_settings = QPushButton("HV Settings")
+        self.btn_hv_enable = QPushButton("HV OFF")
+        self.btn_hv_enable.setCheckable(True)
         self.btn_start = QPushButton("Start")
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setEnabled(False)
         row1.addWidget(self.btn_edit)
+        row1.addWidget(self.btn_hv_settings)
+        row1.addWidget(self.btn_hv_enable)
         row1.addWidget(self.btn_start)
         row1.addWidget(self.btn_stop)
         control_layout.addLayout(row1)
@@ -124,14 +137,17 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.config_label)
 
         self.status_label = QLabel("Status: Idle")
+        self.hv_status_label = QLabel("HV: OFF | IMS AO=0.000 V | Ionization AO=0.000 V")
         self.progress_label = QLabel("Iteration: 0/0 | Average: 0/0")
         self.line_cursor_label = QLabel("Line cursor: x=-- ms, y=--")
         self.heat_cursor_label = QLabel("Heat cursor: x=-- (iter), y=-- ms")
         self.status_label.setMinimumWidth(395)
+        self.hv_status_label.setMinimumWidth(395)
         self.progress_label.setMinimumWidth(395)
         self.line_cursor_label.setMinimumWidth(395)
         self.heat_cursor_label.setMinimumWidth(395)
         control_layout.addWidget(self.status_label)
+        control_layout.addWidget(self.hv_status_label)
         control_layout.addWidget(self.progress_label)
         control_layout.addWidget(self.line_cursor_label)
         control_layout.addWidget(self.heat_cursor_label)
@@ -306,6 +322,8 @@ class MainWindow(QMainWindow):
         root.addWidget(plot_tabs, 0, 1)
 
         self.btn_edit.clicked.connect(self.edit_settings)
+        self.btn_hv_settings.clicked.connect(self.edit_hv_settings)
+        self.btn_hv_enable.toggled.connect(self.on_hv_toggled)
         self.btn_start.clicked.connect(self.start_acquisition)
         self.btn_stop.clicked.connect(self.stop_acquisition)
         self.btn_save_csv.clicked.connect(self.save_csv)
@@ -822,6 +840,101 @@ class MainWindow(QMainWindow):
         )
         self.config_label.setText(text)
 
+    def _daq_for_hv(self) -> NiUSB6351Controller:
+        daq_cfg = DaqConfig(
+            ai_channel=self.config.ai_channel,
+            counter_channel=self.config.counter_channel,
+            pfi_trigger=self.config.pfi_trigger,
+            pulse_width_ms=self.config.pulse_width_ms,
+            experiment_length_ms=self.config.experiment_length_ms,
+            data_points=self.config.data_points,
+            use_simulation=self.config.use_simulation,
+        )
+        return NiUSB6351Controller(daq_cfg)
+
+    def _calculate_hv_outputs(self) -> tuple[float, float, float]:
+        cfg = self.hv_config
+        max_kv = float(cfg.ims_max_output_kv)
+        ctrl_max_v = float(cfg.control_voltage_max_v)
+        ims_kv = float(cfg.ims_setpoint_kv)
+        ion_total_kv = float(cfg.ims_setpoint_kv + cfg.ionization_bias_kv)
+
+        if max_kv <= 0.0:
+            raise ValueError("IMS max output must be greater than 0 kV.")
+        if ctrl_max_v <= 0.0:
+            raise ValueError("Control voltage max must be greater than 0 V.")
+        if ims_kv < 0.0:
+            raise ValueError("IMS setpoint cannot be negative.")
+        if ion_total_kv < 0.0:
+            raise ValueError("Ionization total voltage cannot be negative.")
+        if ims_kv > max_kv:
+            raise ValueError(
+                f"IMS setpoint ({ims_kv:.3f} kV) exceeds IMS max output ({max_kv:.3f} kV)."
+            )
+        if ion_total_kv > max_kv:
+            raise ValueError(
+                f"Ionization total ({ion_total_kv:.3f} kV) exceeds IMS max output ({max_kv:.3f} kV)."
+            )
+
+        ims_v = (ims_kv / max_kv) * ctrl_max_v
+        ion_v = (ion_total_kv / max_kv) * ctrl_max_v
+        return ims_v, ion_v, ion_total_kv
+
+    def _apply_hv_background(self, enabled: bool) -> None:
+        color = "#b73131" if enabled else "#2f8f46"
+        self.setStyleSheet(f"QMainWindow {{ background-color: {color}; }}")
+
+    def _update_hv_status_label(self, ims_v: float, ion_v: float) -> None:
+        state = "ON" if self.hv_enabled else "OFF"
+        self.hv_status_label.setText(
+            f"HV: {state} | IMS AO={ims_v:.3f} V | Ionization AO={ion_v:.3f} V"
+        )
+
+    def _set_hv_outputs(self, enabled: bool, silent: bool = False) -> None:
+        ims_v = 0.0
+        ion_v = 0.0
+
+        if enabled:
+            ims_v, ion_v, _ion_total_kv = self._calculate_hv_outputs()
+
+        try:
+            daq = self._daq_for_hv()
+            daq.write_analog_output(self.hv_config.ims_ao_channel, ims_v)
+            daq.write_analog_output(self.hv_config.ion_ao_channel, ion_v)
+            daq.write_digital_line(self.hv_config.hv_enable_do_line, bool(enabled))
+        except Exception as exc:
+            if not silent:
+                raise RuntimeError(str(exc)) from exc
+
+        self.hv_enabled = bool(enabled)
+        self.btn_hv_enable.blockSignals(True)
+        self.btn_hv_enable.setChecked(self.hv_enabled)
+        self.btn_hv_enable.setText("HV ON" if self.hv_enabled else "HV OFF")
+        self.btn_hv_enable.blockSignals(False)
+        self._apply_hv_background(self.hv_enabled)
+        self._update_hv_status_label(ims_v=ims_v, ion_v=ion_v)
+
+    def _load_default_hv_config(self) -> HVPowerConfig:
+        path = self.DEFAULT_HV_CONFIG_PATH
+        if not path.exists():
+            return HVPowerConfig()
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return HVPowerConfig()
+            return HVPowerConfig.from_dict(raw)
+        except Exception:
+            return HVPowerConfig()
+
+    def _save_default_hv_config(self, config: HVPowerConfig) -> None:
+        path = self.DEFAULT_HV_CONFIG_PATH
+        try:
+            path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+            self.status_label.setText(f"Status: HV defaults saved to {path.name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save defaults failed", f"Could not save HV defaults:\n{exc}")
+
     def _set_heat_cursor_label(
         self,
         x_iter: float | None = None,
@@ -1208,6 +1321,44 @@ class MainWindow(QMainWindow):
             self._refresh_config_label()
             self._refresh_iteration_selector()
             self.update_heatmap(force_levels=True)
+            if self.hv_enabled:
+                try:
+                    self._set_hv_outputs(enabled=True, silent=False)
+                except Exception as exc:
+                    QMessageBox.critical(self, "HV output error", str(exc))
+                    self._set_hv_outputs(enabled=False, silent=True)
+
+    def edit_hv_settings(self) -> None:
+        dlg = HVConfigDialog(self.hv_config, self)
+        if dlg.exec_():
+            self.hv_config = dlg.to_config()
+            if dlg.should_save_as_default():
+                self._save_default_hv_config(self.hv_config)
+
+            if self.hv_enabled:
+                try:
+                    self._set_hv_outputs(enabled=True, silent=False)
+                except Exception as exc:
+                    QMessageBox.critical(self, "HV output error", str(exc))
+                    self._set_hv_outputs(enabled=False, silent=True)
+            else:
+                self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+
+    def on_hv_toggled(self, checked: bool) -> None:
+        try:
+            self._set_hv_outputs(enabled=bool(checked), silent=False)
+            if checked:
+                ims_v, ion_v, ion_total_kv = self._calculate_hv_outputs()
+                self.status_label.setText(
+                    "Status: HV enabled "
+                    f"(IMS={self.hv_config.ims_setpoint_kv:.3f} kV -> {ims_v:.3f} V, "
+                    f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
+                )
+            else:
+                self.status_label.setText("Status: HV disabled")
+        except Exception as exc:
+            QMessageBox.critical(self, "HV output error", str(exc))
+            self._set_hv_outputs(enabled=False, silent=True)
 
     def start_acquisition(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -1335,10 +1486,17 @@ class MainWindow(QMainWindow):
         self._refresh_config_label()
         self._refresh_iteration_selector()
         self.update_heatmap(force_levels=True)
+        if self.hv_enabled:
+            try:
+                self._set_hv_outputs(enabled=True, silent=False)
+            except Exception as exc:
+                QMessageBox.critical(self, "HV output error", str(exc))
+                self._set_hv_outputs(enabled=False, silent=True)
         self.status_label.setText(f"Status: Loaded {Path(file_path).name}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.worker is not None and self.worker.isRunning():
             self.worker.request_stop()
             self.worker.wait(3000)
+        self._set_hv_outputs(enabled=False, silent=True)
         event.accept()

@@ -4,11 +4,25 @@ Python + PyQt5 application for controlling an ion mobility spectrometer acquisit
 
 ## Features
 - Configure pulse width, experiment length, data points, averages, and total iterations
+- Configure external HV control for IMS and Ionization Source power supplies
 - Start/stop during acquisition
+- Independent latched HV enable button (separate from Start)
 - 1D line plot for current or prior iterations
 - 2D colormap across all iterations
 - Save/load experiment data to CSV and HDF5
 - Support for USB-6351 and USB-6341 devices
+
+## External HV Control
+- Open HV parameters with the HV Settings button.
+- Configure AO channels for IMS and Ionization Source plus one DO line for HV enable.
+- Define IMS max output (kV), control voltage max (V), IMS setpoint (kV), and Ionization bias (kV).
+- Ionization Source is computed as IMS setpoint + Ionization bias.
+- The AO mapping is linear:
+   - IMS AO = (IMS setpoint / IMS max output) * control voltage max
+   - Ionization AO = ((IMS setpoint + Ionization bias) / IMS max output) * control voltage max
+- HV ON sets the DO line to TRUE and window background to red.
+- HV OFF sets both AO lines to 0 V, DO line to FALSE, and window background to green.
+- HV settings can be saved to a default JSON file from the HV parameters dialog.
 
 ## Quick Start
 1. Install Python 3.10+
