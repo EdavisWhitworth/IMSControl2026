@@ -7,12 +7,13 @@ import numpy as np
 
 try:
     import nidaqmx
-    from nidaqmx.constants import AcquisitionType, Edge, TerminalConfiguration
+    from nidaqmx.constants import AcquisitionType, Edge, TerminalConfiguration, LineGrouping
     from nidaqmx.stream_writers import CounterWriter
     from nidaqmx.system import System
 except Exception:  # pragma: no cover
     nidaqmx = None
     AcquisitionType = Edge = TerminalConfiguration = None
+    LineGrouping = None
     CounterWriter = None
     System = None
 
@@ -322,3 +323,67 @@ class NiUSB6351Controller:
         noise = self._rng.normal(0, 0.02, size=points)
         scale = 1.0 + self._rng.normal(0, 0.03)
         return (scale * (peak + tail) + noise).astype(np.float64)
+
+    def write_analog_output(self, channel: str, voltage: float) -> None:
+        """Write a single analog-output voltage on the provided AO channel."""
+        if not self.available:
+            return
+        if nidaqmx is None:
+            raise RuntimeError("nidaqmx is not available")
+
+        text = (channel or "").strip()
+        if not text or "/" not in text:
+            raise ValueError(f"Invalid AO channel format: {channel}")
+
+        try:
+            with nidaqmx.Task() as ao_task:
+                ao_task.ao_channels.add_ao_voltage_chan(text)
+                ao_task.write(float(voltage), auto_start=True, timeout=1.0)
+        except Exception as exc:
+            raise RuntimeError(f"Failed AO write on '{text}': {exc}") from exc
+
+    def write_dual_analog_output(
+        self,
+        channel_1: str,
+        channel_2: str,
+        voltage_1: float,
+        voltage_2: float,
+    ) -> None:
+        """Write two AO channels in one task for faster and more stable updates."""
+        if not self.available:
+            return
+        if nidaqmx is None:
+            raise RuntimeError("nidaqmx is not available")
+
+        ch1 = (channel_1 or "").strip()
+        ch2 = (channel_2 or "").strip()
+        if not ch1 or "/" not in ch1:
+            raise ValueError(f"Invalid AO channel format: {channel_1}")
+        if not ch2 or "/" not in ch2:
+            raise ValueError(f"Invalid AO channel format: {channel_2}")
+
+        try:
+            with nidaqmx.Task() as ao_task:
+                ao_task.ao_channels.add_ao_voltage_chan(ch1)
+                ao_task.ao_channels.add_ao_voltage_chan(ch2)
+                ao_task.write([float(voltage_1), float(voltage_2)], auto_start=True, timeout=2.0)
+        except Exception as exc:
+            raise RuntimeError(f"Failed dual AO write on '{ch1}, {ch2}': {exc}") from exc
+
+    def write_digital_line(self, line: str, state: bool) -> None:
+        """Write a single digital line state on the provided DO line."""
+        if not self.available:
+            return
+        if nidaqmx is None:
+            raise RuntimeError("nidaqmx is not available")
+
+        text = (line or "").strip()
+        if not text or "/" not in text:
+            raise ValueError(f"Invalid DO line format: {line}")
+
+        try:
+            with nidaqmx.Task() as do_task:
+                do_task.do_channels.add_do_chan(text, line_grouping=LineGrouping.CHAN_PER_LINE)
+                do_task.write(bool(state), auto_start=True, timeout=1.0)
+        except Exception as exc:
+            raise RuntimeError(f"Failed DO write on '{text}': {exc}") from exc

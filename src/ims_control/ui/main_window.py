@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QTimer, QRectF, Qt
+from PyQt5.QtCore import QThread, QTimer, QRectF, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,20 +28,114 @@ from PyQt5.QtWidgets import (
 )
 
 from ims_control.acquisition.worker_thread import AcquisitionWorker
-from ims_control.data_model.experiment import ExperimentConfig, ExperimentData
+from ims_control.data_model.experiment import ExperimentConfig, ExperimentData, HVPowerConfig
+from ims_control.hardware.daq_interface import DaqConfig, NiUSB6351Controller
 from ims_control.io.export_import import ExperimentExporter, ExperimentImporter
 from ims_control.ui.config_dialog import ExperimentConfigDialog
+from ims_control.ui.hv_config_dialog import HVConfigDialog
+
+
+class HVOutputWorker(QThread):
+    applied = pyqtSignal(bool, float, float)
+    failed = pyqtSignal(str)
+
+    def __init__(self, payload: dict[str, object], timeout_seconds: float = 8.0) -> None:
+        super().__init__()
+        self.payload = payload
+        self.timeout_seconds = float(timeout_seconds)
+        self._proc: subprocess.Popen[str] | None = None
+
+    def request_stop(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    def run(self) -> None:
+        try:
+            src_dir = Path(__file__).resolve().parents[2]
+            cmd = [
+                sys.executable,
+                "-m",
+                "ims_control.acquisition.hv_cli",
+                "--payload",
+                json.dumps(self.payload, separators=(",", ":")),
+            ]
+
+            env = os.environ.copy()
+            existing_pythonpath = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(src_dir) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+
+            self._proc = subprocess.Popen(
+                cmd,
+                cwd=str(src_dir.parent),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            stdout_text, stderr_text = self._proc.communicate(timeout=self.timeout_seconds)
+            exit_code = self._proc.returncode
+
+            if exit_code != 0:
+                error = stderr_text.strip() or "HV subprocess failed"
+                for line in reversed(stdout_text.splitlines()):
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(event, dict) and event.get("ok") is False:
+                        error = str(event.get("error", error))
+                        break
+                self.failed.emit(error)
+                return
+
+            event = None
+            for line in reversed(stdout_text.splitlines()):
+                try:
+                    candidate = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(candidate, dict):
+                    event = candidate
+                    break
+
+            if not isinstance(event, dict) or event.get("ok") is not True:
+                self.failed.emit("HV subprocess returned no valid success payload")
+                return
+
+            self.applied.emit(bool(event.get("enabled", False)), float(event.get("ims_v", 0.0)), float(event.get("ion_v", 0.0)))
+        except subprocess.TimeoutExpired:
+            self.request_stop()
+            self.failed.emit("HV subprocess timed out while writing NI outputs")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self._proc = None
 
 
 class MainWindow(QMainWindow):
     DEFAULT_CONFIG_PATH = Path.home() / ".ims_control_defaults.json"
+    DEFAULT_HV_CONFIG_PATH = Path.home() / ".ims_control_hv_defaults.json"
+    DEFAULT_USER_PARAMS_PATH = Path.home() / ".ims_control_user_params_defaults.json"
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("IMS Control")
-        self.resize(1200, 780)
+        self.resize(1500, 780)
 
         self.config = self._load_default_config()
+        self.user_param_defaults = self._load_default_user_params()
+        self.hv_config = self._load_default_hv_config()
+        self.hv_enabled = False
+        self.hv_worker: HVOutputWorker | None = None
+        self._pending_hv_enabled = False
+        self._pending_hv_ims_v = 0.0
+        self._pending_hv_ion_v = 0.0
         self.experiment_data = ExperimentData(self.config)
         self.worker: AcquisitionWorker | None = None
         self._heat_levels_initialized = False
@@ -74,6 +171,13 @@ class MainWindow(QMainWindow):
         self.noise_end_spinbox: QDoubleSpinBox | None = None
         self.resolving_power_label: QLabel | None = None
         self.snr_label: QLabel | None = None
+        self.hv_state_readout_label: QLabel | None = None
+        self.hv_ims_readout_label: QLabel | None = None
+        self.hv_ion_readout_label: QLabel | None = None
+        self.hv_ims_kv_readout_label: QLabel | None = None
+        self.hv_ion_kv_readout_label: QLabel | None = None
+        self.hardware_params_label: QLabel | None = None
+        self.btn_save_user_params_defaults: QPushButton | None = None
 
         self._line_peak_region: pg.LinearRegionItem | None = None
         self._line_fwhm_left: pg.InfiniteLine | None = None
@@ -84,12 +188,14 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._refresh_config_label()
+        self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+        self._apply_hv_background(False)
 
     def _build_ui(self) -> None:
         central = QWidget()
         root = QGridLayout(central)
         root.setColumnStretch(0, 0)
-        root.setColumnStretch(1, 1)
+        root.setColumnStretch(1, 3)
         self.setCentralWidget(central)
 
         control_box = QGroupBox("Control")
@@ -100,6 +206,13 @@ class MainWindow(QMainWindow):
 
         row1 = QHBoxLayout()
         self.btn_edit = QPushButton("Edit Settings")
+        self.btn_hv_settings = QPushButton("HV Settings")
+        self.btn_hv_enable = QPushButton("HV OFF")
+        self.btn_hv_enable.setCheckable(True)
+        self.btn_hv_update = QPushButton("Update HV Values")
+        self.btn_hv_update.setEnabled(False)
+        self.btn_hv_update.setMinimumWidth(140)
+        self.btn_hv_update.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.btn_start = QPushButton("Start")
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setEnabled(False)
@@ -107,6 +220,11 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.btn_start)
         row1.addWidget(self.btn_stop)
         control_layout.addLayout(row1)
+
+        row1b = QHBoxLayout()
+        row1b.addWidget(self.btn_hv_enable)
+        row1b.addWidget(self.btn_hv_update)
+        row1b.addWidget(self.btn_hv_settings)
 
         row2 = QHBoxLayout()
         self.btn_save_csv = QPushButton("Save CSV")
@@ -121,20 +239,42 @@ class MainWindow(QMainWindow):
         self.config_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.config_label.setWordWrap(True)
         self.config_label.setMinimumWidth(395)
-        control_layout.addWidget(self.config_label)
 
         self.status_label = QLabel("Status: Idle")
+        self.status_label.setMinimumWidth(395)
+        control_layout.addWidget(self.status_label)
+        control_layout.addSpacing(8)
+        control_layout.addWidget(self.config_label)
+
         self.progress_label = QLabel("Iteration: 0/0 | Average: 0/0")
         self.line_cursor_label = QLabel("Line cursor: x=-- ms, y=--")
         self.heat_cursor_label = QLabel("Heat cursor: x=-- (iter), y=-- ms")
-        self.status_label.setMinimumWidth(395)
         self.progress_label.setMinimumWidth(395)
         self.line_cursor_label.setMinimumWidth(395)
         self.heat_cursor_label.setMinimumWidth(395)
-        control_layout.addWidget(self.status_label)
         control_layout.addWidget(self.progress_label)
         control_layout.addWidget(self.line_cursor_label)
         control_layout.addWidget(self.heat_cursor_label)
+
+        hv_readout_box = QGroupBox("HV Readouts")
+        hv_readout_layout = QVBoxLayout(hv_readout_box)
+        hv_readout_layout.addLayout(row1b)
+        self.hv_state_readout_label = QLabel("HV State: OFF")
+        self.hv_ims_readout_label = QLabel("IMS AO: 0.000 V")
+        self.hv_ion_readout_label = QLabel("Ionization AO: 0.000 V")
+        self.hv_ims_kv_readout_label = QLabel("IMS: 0.000 kV")
+        self.hv_ion_kv_readout_label = QLabel("Ionization: 0.000 kV")
+        self.hv_state_readout_label.setMinimumWidth(395)
+        self.hv_ims_readout_label.setMinimumWidth(395)
+        self.hv_ion_readout_label.setMinimumWidth(395)
+        self.hv_ims_kv_readout_label.setMinimumWidth(395)
+        self.hv_ion_kv_readout_label.setMinimumWidth(395)
+        hv_readout_layout.addWidget(self.hv_state_readout_label)
+        hv_readout_layout.addWidget(self.hv_ims_readout_label)
+        hv_readout_layout.addWidget(self.hv_ion_readout_label)
+        hv_readout_layout.addWidget(self.hv_ims_kv_readout_label)
+        hv_readout_layout.addWidget(self.hv_ion_kv_readout_label)
+        control_layout.addWidget(hv_readout_box)
 
         params_box = QGroupBox("Parameters")
         params_layout = QGridLayout(params_box)
@@ -142,47 +282,47 @@ class MainWindow(QMainWindow):
         self.pressure_spinbox = QDoubleSpinBox()
         self.pressure_spinbox.setDecimals(2)
         self.pressure_spinbox.setRange(0.0, 10000.0)
-        self.pressure_spinbox.setValue(705.0)
+        self.pressure_spinbox.setValue(float(self.user_param_defaults["pressure_torr"]))
         self.pressure_spinbox.setSingleStep(1.0)
         self.pressure_spinbox.setSuffix(" Torr")
         
         self.temperature_spinbox = QDoubleSpinBox()
         self.temperature_spinbox.setDecimals(1)
         self.temperature_spinbox.setRange(-273.15, 1000.0)
-        self.temperature_spinbox.setValue(20.0)
+        self.temperature_spinbox.setValue(float(self.user_param_defaults["temperature_c"]))
         self.temperature_spinbox.setSingleStep(0.1)
         self.temperature_spinbox.setSuffix(" °C")
         
         self.length_spinbox = QDoubleSpinBox()
         self.length_spinbox.setDecimals(2)
         self.length_spinbox.setRange(0.1, 1000.0)
-        self.length_spinbox.setValue(10.0)
+        self.length_spinbox.setValue(float(self.user_param_defaults["length_cm"]))
         self.length_spinbox.setSingleStep(0.1)
         self.length_spinbox.setSuffix(" cm")
         
         self.voltage_spinbox = QDoubleSpinBox()
         self.voltage_spinbox.setDecimals(2)
         self.voltage_spinbox.setRange(0.1, 100.0)
-        self.voltage_spinbox.setValue(4.0)
+        self.voltage_spinbox.setValue(float(self.user_param_defaults["voltage_kv"]))
         self.voltage_spinbox.setSingleStep(0.1)
         self.voltage_spinbox.setSuffix(" kV")
         
         self.gate_v_multiplier_spinbox = QDoubleSpinBox()
         self.gate_v_multiplier_spinbox.setDecimals(2)
         self.gate_v_multiplier_spinbox.setRange(0.01, 100.0)
-        self.gate_v_multiplier_spinbox.setValue(0.5)
+        self.gate_v_multiplier_spinbox.setValue(float(self.user_param_defaults["gate_v_multiplier"]))
         self.gate_v_multiplier_spinbox.setSingleStep(0.01)
 
         self.noise_start_spinbox = QDoubleSpinBox()
         self.noise_start_spinbox.setDecimals(3)
         self.noise_start_spinbox.setRange(0.0, 1e6)
-        self.noise_start_spinbox.setValue(0.0)
+        self.noise_start_spinbox.setValue(float(self.user_param_defaults["noise_start_ms"]))
         self.noise_start_spinbox.setSuffix(" ms")
 
         self.noise_end_spinbox = QDoubleSpinBox()
         self.noise_end_spinbox.setDecimals(3)
         self.noise_end_spinbox.setRange(0.0, 1e6)
-        self.noise_end_spinbox.setValue(float(self.config.experiment_length_ms))
+        self.noise_end_spinbox.setValue(float(self.user_param_defaults["noise_end_ms"]))
         self.noise_end_spinbox.setSuffix(" ms")
 
         params_layout.addWidget(QLabel("Pressure"), 0, 0)
@@ -199,6 +339,8 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(self.noise_start_spinbox, 5, 1)
         params_layout.addWidget(QLabel("Noise End"), 6, 0)
         params_layout.addWidget(self.noise_end_spinbox, 6, 1)
+        self.btn_save_user_params_defaults = QPushButton("Save User Parameters as Default")
+        params_layout.addWidget(self.btn_save_user_params_defaults, 7, 0, 1, 2)
         
         control_layout.addWidget(params_box)
 
@@ -215,6 +357,16 @@ class MainWindow(QMainWindow):
         readout_layout.addWidget(self.snr_label)
         
         control_layout.addWidget(readout_box)
+
+        hardware_params_box = QGroupBox("Hardware Parameters")
+        hardware_params_layout = QVBoxLayout(hardware_params_box)
+        self.hardware_params_label = QLabel()
+        self.hardware_params_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.hardware_params_label.setWordWrap(True)
+        self.hardware_params_label.setMinimumWidth(395)
+        hardware_params_layout.addWidget(self.hardware_params_label)
+        control_layout.addWidget(hardware_params_box)
+
         control_layout.addStretch()
 
         plot_tabs = QTabWidget()
@@ -306,6 +458,9 @@ class MainWindow(QMainWindow):
         root.addWidget(plot_tabs, 0, 1)
 
         self.btn_edit.clicked.connect(self.edit_settings)
+        self.btn_hv_settings.clicked.connect(self.edit_hv_settings)
+        self.btn_hv_enable.toggled.connect(self.on_hv_toggled)
+        self.btn_hv_update.clicked.connect(self.on_update_hv_values)
         self.btn_start.clicked.connect(self.start_acquisition)
         self.btn_stop.clicked.connect(self.stop_acquisition)
         self.btn_save_csv.clicked.connect(self.save_csv)
@@ -321,6 +476,7 @@ class MainWindow(QMainWindow):
         self.gate_v_multiplier_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.noise_start_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.noise_end_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.btn_save_user_params_defaults.clicked.connect(self.save_user_parameters_as_default)
 
         self.line_mouse_proxy = pg.SignalProxy(
             self.line_plot.scene().sigMouseMoved,
@@ -347,6 +503,13 @@ class MainWindow(QMainWindow):
         self._on_auto_axis_toggled("selected")
 
         self._refresh_iteration_selector()
+
+    def _refresh_hv_control_states(self) -> None:
+        hv_busy = self.hv_worker is not None and self.hv_worker.isRunning()
+        acquisition_active = self.worker is not None and self.worker.isRunning()
+        self.btn_hv_enable.setEnabled(not hv_busy)
+        self.btn_hv_settings.setEnabled(not hv_busy)
+        self.btn_hv_update.setEnabled(self.hv_enabled and (not hv_busy) and (not acquisition_active))
 
     def _create_axis_controls(self, parent_layout: QVBoxLayout, key: str) -> dict[str, object]:
         controls_widget = QWidget()
@@ -813,14 +976,271 @@ class MainWindow(QMainWindow):
             f"Length: {cfg.experiment_length_ms} ms\n"
             f"Data points: {cfg.data_points}\n"
             f"Averages: {cfg.averages_per_iteration}\n"
-            f"Iterations: {cfg.total_iterations}\n"
+            f"Iterations: {cfg.total_iterations}"
+        )
+        self.config_label.setText(text)
+
+        hardware_text = (
             f"AI: {cfg.ai_channel}\n"
             f"Counter: {cfg.counter_channel}\n"
             f"PFI trigger: {cfg.pfi_trigger}\n"
             f"Polarity: {'Positive' if cfg.positive_mode else 'Negative'}\n"
             f"Acquisition mode: {'Simulation' if cfg.use_simulation else 'Hardware'}"
         )
-        self.config_label.setText(text)
+        if self.hardware_params_label is not None:
+            self.hardware_params_label.setText(hardware_text)
+
+    def _daq_for_hv(self) -> NiUSB6351Controller:
+        daq_cfg = DaqConfig(
+            ai_channel=self.config.ai_channel,
+            counter_channel=self.config.counter_channel,
+            pfi_trigger=self.config.pfi_trigger,
+            pulse_width_ms=self.config.pulse_width_ms,
+            experiment_length_ms=self.config.experiment_length_ms,
+            data_points=self.config.data_points,
+            use_simulation=self.config.use_simulation,
+        )
+        return NiUSB6351Controller(daq_cfg)
+
+    def _calculate_hv_outputs(self) -> tuple[float, float, float]:
+        cfg = self.hv_config
+        max_kv = float(cfg.ims_max_output_kv)
+        ctrl_max_v = float(cfg.control_voltage_max_v)
+        ims_kv = float(cfg.ims_setpoint_kv)
+        ion_total_kv = float(cfg.ims_setpoint_kv + cfg.ionization_bias_kv)
+
+        if max_kv <= 0.0:
+            raise ValueError("IMS max output must be greater than 0 kV.")
+        if ctrl_max_v <= 0.0:
+            raise ValueError("Control voltage max must be greater than 0 V.")
+        if ims_kv < 0.0:
+            raise ValueError("IMS setpoint cannot be negative.")
+        if ion_total_kv < 0.0:
+            raise ValueError("Ionization total voltage cannot be negative.")
+        if ims_kv > max_kv:
+            raise ValueError(
+                f"IMS setpoint ({ims_kv:.3f} kV) exceeds IMS max output ({max_kv:.3f} kV)."
+            )
+        if ion_total_kv > max_kv:
+            raise ValueError(
+                f"Ionization total ({ion_total_kv:.3f} kV) exceeds IMS max output ({max_kv:.3f} kV)."
+            )
+
+        ims_v = (ims_kv / max_kv) * ctrl_max_v
+        ion_v = (ion_total_kv / max_kv) * ctrl_max_v
+        return ims_v, ion_v, ion_total_kv
+
+    def _apply_hv_background(self, enabled: bool) -> None:
+        color = "#b73131" if enabled else "#2f8f46"
+        self.setStyleSheet(f"QMainWindow {{ background-color: {color}; }}")
+
+    def _update_hv_status_label(self, ims_v: float, ion_v: float) -> None:
+        state = "ON" if self.hv_enabled else "OFF"
+        ctrl_max_v = float(self.hv_config.control_voltage_max_v)
+        max_kv = float(self.hv_config.ims_max_output_kv)
+        ims_kv = 0.0
+        ion_kv = 0.0
+        if ctrl_max_v > 0.0 and max_kv > 0.0:
+            ims_kv = (float(ims_v) / ctrl_max_v) * max_kv
+            ion_kv = (float(ion_v) / ctrl_max_v) * max_kv
+
+        if self.hv_state_readout_label is not None:
+            self.hv_state_readout_label.setText(f"HV State: {state}")
+        if self.hv_ims_readout_label is not None:
+            self.hv_ims_readout_label.setText(f"IMS AO: {ims_v:.3f} V")
+        if self.hv_ion_readout_label is not None:
+            self.hv_ion_readout_label.setText(f"Ionization AO: {ion_v:.3f} V")
+        if self.hv_ims_kv_readout_label is not None:
+            self.hv_ims_kv_readout_label.setText(f"IMS: {ims_kv:.3f} kV")
+        if self.hv_ion_kv_readout_label is not None:
+            self.hv_ion_kv_readout_label.setText(f"Ionization: {ion_kv:.3f} kV")
+
+    def _build_hv_payload(self, enabled: bool, ims_v: float, ion_v: float) -> dict[str, object]:
+        return {
+            "ai_channel": self.config.ai_channel,
+            "counter_channel": self.config.counter_channel,
+            "pfi_trigger": self.config.pfi_trigger,
+            "pulse_width_ms": self.config.pulse_width_ms,
+            "experiment_length_ms": self.config.experiment_length_ms,
+            "data_points": self.config.data_points,
+            "use_simulation": self.config.use_simulation,
+            "ims_ao_channel": self.hv_config.ims_ao_channel,
+            "ion_ao_channel": self.hv_config.ion_ao_channel,
+            "hv_enable_do_line": self.hv_config.hv_enable_do_line,
+            "enabled": bool(enabled),
+            "ims_v": float(ims_v),
+            "ion_v": float(ion_v),
+        }
+
+    def _run_hv_payload_sync(self, payload: dict[str, object], timeout_seconds: float = 10.0) -> dict[str, object]:
+        src_dir = Path(__file__).resolve().parents[2]
+        cmd = [
+            sys.executable,
+            "-m",
+            "ims_control.acquisition.hv_cli",
+            "--payload",
+            json.dumps(payload, separators=(",", ":")),
+        ]
+
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(src_dir) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+
+        completed = subprocess.run(
+            cmd,
+            cwd=str(src_dir.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=float(timeout_seconds),
+            check=False,
+        )
+
+        event = None
+        for line in reversed(completed.stdout.splitlines()):
+            try:
+                candidate = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(candidate, dict):
+                event = candidate
+                break
+
+        if completed.returncode != 0:
+            error = completed.stderr.strip() or "HV subprocess failed"
+            if isinstance(event, dict) and event.get("ok") is False:
+                error = str(event.get("error", error))
+            raise RuntimeError(error)
+
+        if not isinstance(event, dict) or event.get("ok") is not True:
+            raise RuntimeError("HV subprocess returned no valid success payload")
+
+        return event
+
+    def _set_hv_outputs(self, enabled: bool, silent: bool = False) -> None:
+        ims_v = 0.0
+        ion_v = 0.0
+
+        if enabled:
+            ims_v, ion_v, _ion_total_kv = self._calculate_hv_outputs()
+
+        try:
+            daq = self._daq_for_hv()
+            daq.write_analog_output(self.hv_config.ims_ao_channel, ims_v)
+            daq.write_analog_output(self.hv_config.ion_ao_channel, ion_v)
+            daq.write_digital_line(self.hv_config.hv_enable_do_line, bool(enabled))
+        except Exception as exc:
+            if not silent:
+                raise RuntimeError(str(exc)) from exc
+
+        self.hv_enabled = bool(enabled)
+        self.btn_hv_enable.blockSignals(True)
+        self.btn_hv_enable.setChecked(self.hv_enabled)
+        self.btn_hv_enable.setText("HV ON" if self.hv_enabled else "HV OFF")
+        self.btn_hv_enable.blockSignals(False)
+        self._apply_hv_background(self.hv_enabled)
+        self._update_hv_status_label(ims_v=ims_v, ion_v=ion_v)
+
+    def _start_hv_apply(self, enabled: bool) -> None:
+        if self.hv_worker is not None and self.hv_worker.isRunning():
+            self.status_label.setText("Status: HV update already in progress")
+            self.btn_hv_enable.blockSignals(True)
+            self.btn_hv_enable.setChecked(self.hv_enabled)
+            self.btn_hv_enable.blockSignals(False)
+            self._refresh_hv_control_states()
+            return
+
+        ims_v = 0.0
+        ion_v = 0.0
+        if enabled:
+            ims_v, ion_v, _ion_total_kv = self._calculate_hv_outputs()
+
+        self._pending_hv_enabled = bool(enabled)
+        self._pending_hv_ims_v = float(ims_v)
+        self._pending_hv_ion_v = float(ion_v)
+
+        self._refresh_hv_control_states()
+        self.status_label.setText("Status: Applying HV outputs...")
+
+        payload = self._build_hv_payload(enabled=bool(enabled), ims_v=float(ims_v), ion_v=float(ion_v))
+
+        self.hv_worker = HVOutputWorker(payload=payload, timeout_seconds=30.0)
+        self.hv_worker.applied.connect(self._on_hv_apply_success)
+        self.hv_worker.failed.connect(self._on_hv_apply_failed)
+        self.hv_worker.finished.connect(self._on_hv_apply_finished)
+        self.hv_worker.start()
+
+    def _on_hv_apply_success(self, enabled: bool, ims_v: float, ion_v: float) -> None:
+        self.hv_enabled = bool(enabled)
+        self.btn_hv_enable.blockSignals(True)
+        self.btn_hv_enable.setChecked(self.hv_enabled)
+        self.btn_hv_enable.setText("HV ON" if self.hv_enabled else "HV OFF")
+        self.btn_hv_enable.blockSignals(False)
+        self._apply_hv_background(self.hv_enabled)
+        self._update_hv_status_label(ims_v=ims_v, ion_v=ion_v)
+
+        if self.hv_enabled:
+            _ims_v, _ion_v, ion_total_kv = self._calculate_hv_outputs()
+            self.status_label.setText(
+                "Status: HV enabled "
+                f"(IMS={self.hv_config.ims_setpoint_kv:.3f} kV -> {ims_v:.3f} V, "
+                f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
+            )
+        else:
+            self.status_label.setText("Status: HV disabled")
+        self._refresh_hv_control_states()
+
+    def _on_hv_apply_failed(self, message: str) -> None:
+        self.hv_enabled = False
+        self.btn_hv_enable.blockSignals(True)
+        self.btn_hv_enable.setChecked(False)
+        self.btn_hv_enable.setText("HV OFF")
+        self.btn_hv_enable.blockSignals(False)
+        self._apply_hv_background(False)
+        self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+        self._refresh_hv_control_states()
+        QMessageBox.critical(self, "HV output error", message)
+
+    def _on_hv_apply_finished(self) -> None:
+        self.hv_worker = None
+        self._refresh_hv_control_states()
+
+    def on_update_hv_values(self) -> None:
+        if not self.hv_enabled:
+            return
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "Acquisition active", "Update HV Values is disabled during acquisition.")
+            self._refresh_hv_control_states()
+            return
+        try:
+            self.status_label.setText("Status: Applying updated HV values...")
+            self._start_hv_apply(enabled=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "HV output error", str(exc))
+            self._refresh_hv_control_states()
+
+    def _load_default_hv_config(self) -> HVPowerConfig:
+        path = self.DEFAULT_HV_CONFIG_PATH
+        if not path.exists():
+            return HVPowerConfig()
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return HVPowerConfig()
+            return HVPowerConfig.from_dict(raw)
+        except Exception:
+            return HVPowerConfig()
+
+    def _save_default_hv_config(self, config: HVPowerConfig) -> None:
+        path = self.DEFAULT_HV_CONFIG_PATH
+        try:
+            path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+            self.status_label.setText(f"Status: HV defaults saved to {path.name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save defaults failed", f"Could not save HV defaults:\n{exc}")
 
     def _set_heat_cursor_label(
         self,
@@ -840,6 +1260,77 @@ class MainWindow(QMainWindow):
             return
 
         self.heat_cursor_label.setText(f"{base_line}\n    z={z_value:.6f}")
+
+    def _default_noise_window(self) -> tuple[float, float]:
+        length_ms = float(self.config.experiment_length_ms)
+        noise_end = max(length_ms, 0.0)
+        noise_start = max(noise_end - 10.0, 0.0)
+        return noise_start, noise_end
+
+    def _load_default_user_params(self) -> dict[str, float]:
+        noise_start_default, noise_end_default = self._default_noise_window()
+        defaults = {
+            "pressure_torr": 705.0,
+            "temperature_c": 20.0,
+            "length_cm": 10.0,
+            "voltage_kv": 4.0,
+            "gate_v_multiplier": 0.5,
+            "noise_start_ms": noise_start_default,
+            "noise_end_ms": noise_end_default,
+        }
+
+        path = self.DEFAULT_USER_PARAMS_PATH
+        if not path.exists():
+            return defaults
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return defaults
+
+            for key in defaults:
+                if key in raw:
+                    defaults[key] = float(raw[key])
+
+            if "noise_start_ms" not in raw and "noise_end_ms" not in raw:
+                defaults["noise_start_ms"], defaults["noise_end_ms"] = self._default_noise_window()
+
+            noise_start = max(0.0, float(defaults["noise_start_ms"]))
+            noise_end = max(0.0, float(defaults["noise_end_ms"]))
+            if noise_start > noise_end:
+                noise_start, noise_end = noise_end, noise_start
+            defaults["noise_start_ms"] = noise_start
+            defaults["noise_end_ms"] = noise_end
+            return defaults
+        except Exception:
+            return defaults
+
+    def _current_user_params(self) -> dict[str, float]:
+        return {
+            "pressure_torr": float(self.pressure_spinbox.value()),
+            "temperature_c": float(self.temperature_spinbox.value()),
+            "length_cm": float(self.length_spinbox.value()),
+            "voltage_kv": float(self.voltage_spinbox.value()),
+            "gate_v_multiplier": float(self.gate_v_multiplier_spinbox.value()),
+            "noise_start_ms": float(self.noise_start_spinbox.value()),
+            "noise_end_ms": float(self.noise_end_spinbox.value()),
+        }
+
+    def _save_default_user_params(self, values: dict[str, float]) -> bool:
+        path = self.DEFAULT_USER_PARAMS_PATH
+        try:
+            path.write_text(json.dumps(values, indent=2), encoding="utf-8")
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "Save defaults failed", f"Could not save user parameter defaults:\n{exc}")
+            return False
+
+    def save_user_parameters_as_default(self) -> None:
+        values = self._current_user_params()
+        if not self._save_default_user_params(values):
+            return
+        self.user_param_defaults = values
+        self.status_label.setText(f"Status: User parameter defaults saved to {self.DEFAULT_USER_PARAMS_PATH.name}")
 
     def _load_default_config(self) -> ExperimentConfig:
         path = self.DEFAULT_CONFIG_PATH
@@ -1208,6 +1699,34 @@ class MainWindow(QMainWindow):
             self._refresh_config_label()
             self._refresh_iteration_selector()
             self.update_heatmap(force_levels=True)
+            if self.hv_enabled:
+                self.status_label.setText("Status: Settings updated. Click Update HV Values to apply HV changes.")
+
+    def edit_hv_settings(self) -> None:
+        dlg = HVConfigDialog(self.hv_config, self)
+        if dlg.exec_():
+            self.hv_config = dlg.to_config()
+            if dlg.should_save_as_default():
+                self._save_default_hv_config(self.hv_config)
+            if self.hv_enabled:
+                self.status_label.setText("Status: HV settings updated. Click Update HV Values to apply.")
+            else:
+                self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+            self._refresh_hv_control_states()
+
+    def on_hv_toggled(self, checked: bool) -> None:
+        try:
+            self._start_hv_apply(enabled=bool(checked))
+        except Exception as exc:
+            QMessageBox.critical(self, "HV output error", str(exc))
+            self.hv_enabled = False
+            self.btn_hv_enable.blockSignals(True)
+            self.btn_hv_enable.setChecked(False)
+            self.btn_hv_enable.setText("HV OFF")
+            self.btn_hv_enable.blockSignals(False)
+            self._apply_hv_background(False)
+            self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+            self._refresh_hv_control_states()
 
     def start_acquisition(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -1232,6 +1751,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_edit.setEnabled(False)
+        self._refresh_hv_control_states()
         self.worker.start()
 
     def stop_acquisition(self) -> None:
@@ -1292,11 +1812,13 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_edit.setEnabled(True)
+        self._refresh_hv_control_states()
 
     def on_failed(self, message: str) -> None:
         self.on_finished()
         QMessageBox.critical(self, "Acquisition error", message)
         self.status_label.setText("Status: Error")
+        self._refresh_hv_control_states()
 
     def save_csv(self) -> None:
         if self.experiment_data.iteration_count() == 0:
@@ -1335,10 +1857,37 @@ class MainWindow(QMainWindow):
         self._refresh_config_label()
         self._refresh_iteration_selector()
         self.update_heatmap(force_levels=True)
+        if self.hv_enabled:
+            try:
+                self._set_hv_outputs(enabled=True, silent=False)
+            except Exception as exc:
+                QMessageBox.critical(self, "HV output error", str(exc))
+                self._set_hv_outputs(enabled=False, silent=True)
         self.status_label.setText(f"Status: Loaded {Path(file_path).name}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.worker is not None and self.worker.isRunning():
             self.worker.request_stop()
             self.worker.wait(3000)
+        if self.hv_worker is not None and self.hv_worker.isRunning():
+            self.hv_worker.request_stop()
+            self.hv_worker.wait(200)
+
+        if self.hv_enabled:
+            try:
+                payload = self._build_hv_payload(enabled=False, ims_v=0.0, ion_v=0.0)
+                self._run_hv_payload_sync(payload=payload, timeout_seconds=10.0)
+                self.hv_enabled = False
+                self.btn_hv_enable.blockSignals(True)
+                self.btn_hv_enable.setChecked(False)
+                self.btn_hv_enable.setText("HV OFF")
+                self.btn_hv_enable.blockSignals(False)
+                self._apply_hv_background(False)
+                self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "HV shutdown warning",
+                    f"Failed to switch HV OFF before exit:\n{exc}",
+                )
         event.accept()
