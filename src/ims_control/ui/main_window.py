@@ -200,12 +200,15 @@ class MainWindow(QMainWindow):
         self.btn_hv_settings = QPushButton("HV Settings")
         self.btn_hv_enable = QPushButton("HV OFF")
         self.btn_hv_enable.setCheckable(True)
+        self.btn_hv_update = QPushButton("Update HV Values")
+        self.btn_hv_update.setEnabled(False)
         self.btn_start = QPushButton("Start")
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setEnabled(False)
         row1.addWidget(self.btn_edit)
         row1.addWidget(self.btn_hv_settings)
         row1.addWidget(self.btn_hv_enable)
+        row1.addWidget(self.btn_hv_update)
         row1.addWidget(self.btn_start)
         row1.addWidget(self.btn_stop)
         control_layout.addLayout(row1)
@@ -413,6 +416,7 @@ class MainWindow(QMainWindow):
         self.btn_edit.clicked.connect(self.edit_settings)
         self.btn_hv_settings.clicked.connect(self.edit_hv_settings)
         self.btn_hv_enable.toggled.connect(self.on_hv_toggled)
+        self.btn_hv_update.clicked.connect(self.on_update_hv_values)
         self.btn_start.clicked.connect(self.start_acquisition)
         self.btn_stop.clicked.connect(self.stop_acquisition)
         self.btn_save_csv.clicked.connect(self.save_csv)
@@ -454,6 +458,13 @@ class MainWindow(QMainWindow):
         self._on_auto_axis_toggled("selected")
 
         self._refresh_iteration_selector()
+
+    def _refresh_hv_control_states(self) -> None:
+        hv_busy = self.hv_worker is not None and self.hv_worker.isRunning()
+        acquisition_active = self.worker is not None and self.worker.isRunning()
+        self.btn_hv_enable.setEnabled(not hv_busy)
+        self.btn_hv_settings.setEnabled(not hv_busy)
+        self.btn_hv_update.setEnabled(self.hv_enabled and (not hv_busy) and (not acquisition_active))
 
     def _create_axis_controls(self, parent_layout: QVBoxLayout, key: str) -> dict[str, object]:
         controls_widget = QWidget()
@@ -1009,6 +1020,7 @@ class MainWindow(QMainWindow):
             self.btn_hv_enable.blockSignals(True)
             self.btn_hv_enable.setChecked(self.hv_enabled)
             self.btn_hv_enable.blockSignals(False)
+            self._refresh_hv_control_states()
             return
 
         ims_v = 0.0
@@ -1020,8 +1032,7 @@ class MainWindow(QMainWindow):
         self._pending_hv_ims_v = float(ims_v)
         self._pending_hv_ion_v = float(ion_v)
 
-        self.btn_hv_enable.setEnabled(False)
-        self.btn_hv_settings.setEnabled(False)
+        self._refresh_hv_control_states()
         self.status_label.setText("Status: Applying HV outputs...")
 
         payload: dict[str, object] = {
@@ -1064,6 +1075,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.status_label.setText("Status: HV disabled")
+        self._refresh_hv_control_states()
 
     def _on_hv_apply_failed(self, message: str) -> None:
         self.hv_enabled = False
@@ -1073,12 +1085,26 @@ class MainWindow(QMainWindow):
         self.btn_hv_enable.blockSignals(False)
         self._apply_hv_background(False)
         self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+        self._refresh_hv_control_states()
         QMessageBox.critical(self, "HV output error", message)
 
     def _on_hv_apply_finished(self) -> None:
-        self.btn_hv_enable.setEnabled(True)
-        self.btn_hv_settings.setEnabled(True)
         self.hv_worker = None
+        self._refresh_hv_control_states()
+
+    def on_update_hv_values(self) -> None:
+        if not self.hv_enabled:
+            return
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "Acquisition active", "Update HV Values is disabled during acquisition.")
+            self._refresh_hv_control_states()
+            return
+        try:
+            self.status_label.setText("Status: Applying updated HV values...")
+            self._start_hv_apply(enabled=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "HV output error", str(exc))
+            self._refresh_hv_control_states()
 
     def _load_default_hv_config(self) -> HVPowerConfig:
         path = self.DEFAULT_HV_CONFIG_PATH
@@ -1488,11 +1514,7 @@ class MainWindow(QMainWindow):
             self._refresh_iteration_selector()
             self.update_heatmap(force_levels=True)
             if self.hv_enabled:
-                try:
-                    self._set_hv_outputs(enabled=True, silent=False)
-                except Exception as exc:
-                    QMessageBox.critical(self, "HV output error", str(exc))
-                    self._set_hv_outputs(enabled=False, silent=True)
+                self.status_label.setText("Status: Settings updated. Click Update HV Values to apply HV changes.")
 
     def edit_hv_settings(self) -> None:
         dlg = HVConfigDialog(self.hv_config, self)
@@ -1500,22 +1522,25 @@ class MainWindow(QMainWindow):
             self.hv_config = dlg.to_config()
             if dlg.should_save_as_default():
                 self._save_default_hv_config(self.hv_config)
-
             if self.hv_enabled:
-                try:
-                    self._set_hv_outputs(enabled=True, silent=False)
-                except Exception as exc:
-                    QMessageBox.critical(self, "HV output error", str(exc))
-                    self._set_hv_outputs(enabled=False, silent=True)
+                self.status_label.setText("Status: HV settings updated. Click Update HV Values to apply.")
             else:
                 self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+            self._refresh_hv_control_states()
 
     def on_hv_toggled(self, checked: bool) -> None:
         try:
             self._start_hv_apply(enabled=bool(checked))
         except Exception as exc:
             QMessageBox.critical(self, "HV output error", str(exc))
-            self._set_hv_outputs(enabled=False, silent=True)
+            self.hv_enabled = False
+            self.btn_hv_enable.blockSignals(True)
+            self.btn_hv_enable.setChecked(False)
+            self.btn_hv_enable.setText("HV OFF")
+            self.btn_hv_enable.blockSignals(False)
+            self._apply_hv_background(False)
+            self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+            self._refresh_hv_control_states()
 
     def start_acquisition(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -1540,6 +1565,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_edit.setEnabled(False)
+        self._refresh_hv_control_states()
         self.worker.start()
 
     def stop_acquisition(self) -> None:
@@ -1600,11 +1626,13 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_edit.setEnabled(True)
+        self._refresh_hv_control_states()
 
     def on_failed(self, message: str) -> None:
         self.on_finished()
         QMessageBox.critical(self, "Acquisition error", message)
         self.status_label.setText("Status: Error")
+        self._refresh_hv_control_states()
 
     def save_csv(self) -> None:
         if self.experiment_data.iteration_count() == 0:
