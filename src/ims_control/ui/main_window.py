@@ -131,13 +131,9 @@ class MainWindow(QMainWindow):
         self.hv_config = self._load_default_hv_config()
         self.hv_enabled = False
         self.hv_worker: HVOutputWorker | None = None
-        self.hv_operation_timed_out = False
         self._pending_hv_enabled = False
         self._pending_hv_ims_v = 0.0
         self._pending_hv_ion_v = 0.0
-        self.hv_watchdog = QTimer(self)
-        self.hv_watchdog.setSingleShot(True)
-        self.hv_watchdog.timeout.connect(self._on_hv_apply_timeout)
         self.experiment_data = ExperimentData(self.config)
         self.worker: AcquisitionWorker | None = None
         self._heat_levels_initialized = False
@@ -1023,12 +1019,10 @@ class MainWindow(QMainWindow):
         self._pending_hv_enabled = bool(enabled)
         self._pending_hv_ims_v = float(ims_v)
         self._pending_hv_ion_v = float(ion_v)
-        self.hv_operation_timed_out = False
 
         self.btn_hv_enable.setEnabled(False)
         self.btn_hv_settings.setEnabled(False)
         self.status_label.setText("Status: Applying HV outputs...")
-        self.hv_watchdog.start(10000)
 
         payload: dict[str, object] = {
             "ai_channel": self.config.ai_channel,
@@ -1046,7 +1040,7 @@ class MainWindow(QMainWindow):
             "ion_v": float(ion_v),
         }
 
-        self.hv_worker = HVOutputWorker(payload=payload, timeout_seconds=8.0)
+        self.hv_worker = HVOutputWorker(payload=payload, timeout_seconds=30.0)
         self.hv_worker.applied.connect(self._on_hv_apply_success)
         self.hv_worker.failed.connect(self._on_hv_apply_failed)
         self.hv_worker.finished.connect(self._on_hv_apply_finished)
@@ -1063,16 +1057,13 @@ class MainWindow(QMainWindow):
 
         if self.hv_enabled:
             _ims_v, _ion_v, ion_total_kv = self._calculate_hv_outputs()
-            suffix = " (completed after timeout)" if self.hv_operation_timed_out else ""
             self.status_label.setText(
                 "Status: HV enabled "
                 f"(IMS={self.hv_config.ims_setpoint_kv:.3f} kV -> {ims_v:.3f} V, "
-                f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V){suffix}"
+                f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
             )
         else:
-            suffix = " (completed after timeout)" if self.hv_operation_timed_out else ""
-            self.status_label.setText(f"Status: HV disabled{suffix}")
-        self.hv_operation_timed_out = False
+            self.status_label.setText("Status: HV disabled")
 
     def _on_hv_apply_failed(self, message: str) -> None:
         self.hv_enabled = False
@@ -1082,28 +1073,12 @@ class MainWindow(QMainWindow):
         self.btn_hv_enable.blockSignals(False)
         self._apply_hv_background(False)
         self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
-        self.hv_operation_timed_out = False
         QMessageBox.critical(self, "HV output error", message)
 
     def _on_hv_apply_finished(self) -> None:
-        self.hv_watchdog.stop()
         self.btn_hv_enable.setEnabled(True)
         self.btn_hv_settings.setEnabled(True)
         self.hv_worker = None
-
-    def _on_hv_apply_timeout(self) -> None:
-        if self.hv_worker is None or not self.hv_worker.isRunning():
-            return
-        self.hv_operation_timed_out = True
-        self.hv_worker.request_stop()
-        self.btn_hv_enable.setEnabled(True)
-        self.btn_hv_settings.setEnabled(True)
-        self.btn_hv_enable.blockSignals(True)
-        self.btn_hv_enable.setChecked(self.hv_enabled)
-        self.btn_hv_enable.setText("HV ON" if self.hv_enabled else "HV OFF")
-        self.btn_hv_enable.blockSignals(False)
-        self.status_label.setText("Status: HV control timeout; check channels/wiring")
-        QMessageBox.warning(self, "HV timeout", "HV command is taking longer than expected. Waiting for NI response.")
 
     def _load_default_hv_config(self) -> HVPowerConfig:
         path = self.DEFAULT_HV_CONFIG_PATH
@@ -1680,7 +1655,6 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             self.worker.request_stop()
             self.worker.wait(3000)
-        self.hv_watchdog.stop()
         if self.hv_worker is not None and self.hv_worker.isRunning():
             self.hv_worker.request_stop()
             self.hv_worker.wait(200)
