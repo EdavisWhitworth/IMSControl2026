@@ -185,7 +185,6 @@ class MainWindow(QMainWindow):
         self._refresh_config_label()
         self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
         self._apply_hv_background(False)
-        self._set_hv_outputs(enabled=False, silent=True)
 
     def _build_ui(self) -> None:
         central = QWidget()
