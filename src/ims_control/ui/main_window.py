@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pyqtgraph as pg
@@ -36,38 +39,83 @@ class HVOutputWorker(QThread):
     applied = pyqtSignal(bool, float, float)
     failed = pyqtSignal(str)
 
-    def __init__(
-        self,
-        daq_config: DaqConfig,
-        ims_ao_channel: str,
-        ion_ao_channel: str,
-        hv_enable_do_line: str,
-        enabled: bool,
-        ims_v: float,
-        ion_v: float,
-    ) -> None:
+    def __init__(self, payload: dict[str, object], timeout_seconds: float = 8.0) -> None:
         super().__init__()
-        self.daq_config = daq_config
-        self.ims_ao_channel = ims_ao_channel
-        self.ion_ao_channel = ion_ao_channel
-        self.hv_enable_do_line = hv_enable_do_line
-        self.enabled = bool(enabled)
-        self.ims_v = float(ims_v)
-        self.ion_v = float(ion_v)
+        self.payload = payload
+        self.timeout_seconds = float(timeout_seconds)
+        self._proc: subprocess.Popen[str] | None = None
+
+    def request_stop(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def run(self) -> None:
         try:
-            daq = NiUSB6351Controller(self.daq_config)
-            daq.write_dual_analog_output(
-                self.ims_ao_channel,
-                self.ion_ao_channel,
-                self.ims_v,
-                self.ion_v,
+            src_dir = Path(__file__).resolve().parents[2]
+            cmd = [
+                sys.executable,
+                "-m",
+                "ims_control.acquisition.hv_cli",
+                "--payload",
+                json.dumps(self.payload, separators=(",", ":")),
+            ]
+
+            env = os.environ.copy()
+            existing_pythonpath = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(src_dir) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+
+            self._proc = subprocess.Popen(
+                cmd,
+                cwd=str(src_dir.parent),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
-            daq.write_digital_line(self.hv_enable_do_line, self.enabled)
-            self.applied.emit(self.enabled, self.ims_v, self.ion_v)
+
+            stdout_text, stderr_text = self._proc.communicate(timeout=self.timeout_seconds)
+            exit_code = self._proc.returncode
+
+            if exit_code != 0:
+                error = stderr_text.strip() or "HV subprocess failed"
+                for line in reversed(stdout_text.splitlines()):
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(event, dict) and event.get("ok") is False:
+                        error = str(event.get("error", error))
+                        break
+                self.failed.emit(error)
+                return
+
+            event = None
+            for line in reversed(stdout_text.splitlines()):
+                try:
+                    candidate = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(candidate, dict):
+                    event = candidate
+                    break
+
+            if not isinstance(event, dict) or event.get("ok") is not True:
+                self.failed.emit("HV subprocess returned no valid success payload")
+                return
+
+            self.applied.emit(bool(event.get("enabled", False)), float(event.get("ims_v", 0.0)), float(event.get("ion_v", 0.0)))
+        except subprocess.TimeoutExpired:
+            self.request_stop()
+            self.failed.emit("HV subprocess timed out while writing NI outputs")
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            self._proc = None
 
 
 class MainWindow(QMainWindow):
@@ -973,16 +1021,6 @@ class MainWindow(QMainWindow):
         if enabled:
             ims_v, ion_v, _ion_total_kv = self._calculate_hv_outputs()
 
-        daq_cfg = DaqConfig(
-            ai_channel=self.config.ai_channel,
-            counter_channel=self.config.counter_channel,
-            pfi_trigger=self.config.pfi_trigger,
-            pulse_width_ms=self.config.pulse_width_ms,
-            experiment_length_ms=self.config.experiment_length_ms,
-            data_points=self.config.data_points,
-            use_simulation=self.config.use_simulation,
-        )
-
         self._pending_hv_enabled = bool(enabled)
         self._pending_hv_ims_v = float(ims_v)
         self._pending_hv_ion_v = float(ion_v)
@@ -993,15 +1031,23 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Status: Applying HV outputs...")
         self.hv_watchdog.start(10000)
 
-        self.hv_worker = HVOutputWorker(
-            daq_config=daq_cfg,
-            ims_ao_channel=self.hv_config.ims_ao_channel,
-            ion_ao_channel=self.hv_config.ion_ao_channel,
-            hv_enable_do_line=self.hv_config.hv_enable_do_line,
-            enabled=bool(enabled),
-            ims_v=float(ims_v),
-            ion_v=float(ion_v),
-        )
+        payload: dict[str, object] = {
+            "ai_channel": self.config.ai_channel,
+            "counter_channel": self.config.counter_channel,
+            "pfi_trigger": self.config.pfi_trigger,
+            "pulse_width_ms": self.config.pulse_width_ms,
+            "experiment_length_ms": self.config.experiment_length_ms,
+            "data_points": self.config.data_points,
+            "use_simulation": self.config.use_simulation,
+            "ims_ao_channel": self.hv_config.ims_ao_channel,
+            "ion_ao_channel": self.hv_config.ion_ao_channel,
+            "hv_enable_do_line": self.hv_config.hv_enable_do_line,
+            "enabled": bool(enabled),
+            "ims_v": float(ims_v),
+            "ion_v": float(ion_v),
+        }
+
+        self.hv_worker = HVOutputWorker(payload=payload, timeout_seconds=8.0)
         self.hv_worker.applied.connect(self._on_hv_apply_success)
         self.hv_worker.failed.connect(self._on_hv_apply_failed)
         self.hv_worker.finished.connect(self._on_hv_apply_finished)
@@ -1050,6 +1096,7 @@ class MainWindow(QMainWindow):
         if self.hv_worker is None or not self.hv_worker.isRunning():
             return
         self.hv_operation_timed_out = True
+        self.hv_worker.request_stop()
         self.btn_hv_enable.setEnabled(True)
         self.btn_hv_settings.setEnabled(True)
         self.btn_hv_enable.blockSignals(True)
@@ -1636,7 +1683,6 @@ class MainWindow(QMainWindow):
             self.worker.wait(3000)
         self.hv_watchdog.stop()
         if self.hv_worker is not None and self.hv_worker.isRunning():
-            self.hv_worker.requestInterruption()
-            self.hv_worker.quit()
+            self.hv_worker.request_stop()
             self.hv_worker.wait(200)
         event.accept()
