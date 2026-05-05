@@ -342,6 +342,34 @@ class NiUSB6351Controller:
         except Exception as exc:
             raise RuntimeError(f"Failed AO write on '{text}': {exc}") from exc
 
+    def write_dual_analog_output(
+        self,
+        channel_1: str,
+        channel_2: str,
+        voltage_1: float,
+        voltage_2: float,
+    ) -> None:
+        """Write two AO channels in one task for faster and more stable updates."""
+        if not self.available:
+            return
+        if nidaqmx is None:
+            raise RuntimeError("nidaqmx is not available")
+
+        ch1 = (channel_1 or "").strip()
+        ch2 = (channel_2 or "").strip()
+        if not ch1 or "/" not in ch1:
+            raise ValueError(f"Invalid AO channel format: {channel_1}")
+        if not ch2 or "/" not in ch2:
+            raise ValueError(f"Invalid AO channel format: {channel_2}")
+
+        try:
+            with nidaqmx.Task() as ao_task:
+                ao_task.ao_channels.add_ao_voltage_chan(ch1)
+                ao_task.ao_channels.add_ao_voltage_chan(ch2)
+                ao_task.write([float(voltage_1), float(voltage_2)], auto_start=True, timeout=2.0)
+        except Exception as exc:
+            raise RuntimeError(f"Failed dual AO write on '{ch1}, {ch2}': {exc}") from exc
+
     def write_digital_line(self, line: str, state: bool) -> None:
         """Write a single digital line state on the provided DO line."""
         if not self.available:

@@ -58,8 +58,12 @@ class HVOutputWorker(QThread):
     def run(self) -> None:
         try:
             daq = NiUSB6351Controller(self.daq_config)
-            daq.write_analog_output(self.ims_ao_channel, self.ims_v)
-            daq.write_analog_output(self.ion_ao_channel, self.ion_v)
+            daq.write_dual_analog_output(
+                self.ims_ao_channel,
+                self.ion_ao_channel,
+                self.ims_v,
+                self.ion_v,
+            )
             daq.write_digital_line(self.hv_enable_do_line, self.enabled)
             self.applied.emit(self.enabled, self.ims_v, self.ion_v)
         except Exception as exc:
@@ -987,7 +991,7 @@ class MainWindow(QMainWindow):
         self.btn_hv_enable.setEnabled(False)
         self.btn_hv_settings.setEnabled(False)
         self.status_label.setText("Status: Applying HV outputs...")
-        self.hv_watchdog.start(2500)
+        self.hv_watchdog.start(10000)
 
         self.hv_worker = HVOutputWorker(
             daq_config=daq_cfg,
@@ -1004,8 +1008,6 @@ class MainWindow(QMainWindow):
         self.hv_worker.start()
 
     def _on_hv_apply_success(self, enabled: bool, ims_v: float, ion_v: float) -> None:
-        if self.hv_operation_timed_out:
-            return
         self.hv_enabled = bool(enabled)
         self.btn_hv_enable.blockSignals(True)
         self.btn_hv_enable.setChecked(self.hv_enabled)
@@ -1016,17 +1018,18 @@ class MainWindow(QMainWindow):
 
         if self.hv_enabled:
             _ims_v, _ion_v, ion_total_kv = self._calculate_hv_outputs()
+            suffix = " (completed after timeout)" if self.hv_operation_timed_out else ""
             self.status_label.setText(
                 "Status: HV enabled "
                 f"(IMS={self.hv_config.ims_setpoint_kv:.3f} kV -> {ims_v:.3f} V, "
-                f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
+                f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V){suffix}"
             )
         else:
-            self.status_label.setText("Status: HV disabled")
+            suffix = " (completed after timeout)" if self.hv_operation_timed_out else ""
+            self.status_label.setText(f"Status: HV disabled{suffix}")
+        self.hv_operation_timed_out = False
 
     def _on_hv_apply_failed(self, message: str) -> None:
-        if self.hv_operation_timed_out:
-            return
         self.hv_enabled = False
         self.btn_hv_enable.blockSignals(True)
         self.btn_hv_enable.setChecked(False)
@@ -1034,6 +1037,7 @@ class MainWindow(QMainWindow):
         self.btn_hv_enable.blockSignals(False)
         self._apply_hv_background(False)
         self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
+        self.hv_operation_timed_out = False
         QMessageBox.critical(self, "HV output error", message)
 
     def _on_hv_apply_finished(self) -> None:
@@ -1053,11 +1057,7 @@ class MainWindow(QMainWindow):
         self.btn_hv_enable.setText("HV ON" if self.hv_enabled else "HV OFF")
         self.btn_hv_enable.blockSignals(False)
         self.status_label.setText("Status: HV control timeout; check channels/wiring")
-        QMessageBox.warning(
-            self,
-            "HV timeout",
-            "HV control command timed out. Controls were re-enabled so the app remains responsive.",
-        )
+        QMessageBox.warning(self, "HV timeout", "HV command is taking longer than expected. Waiting for NI response.")
 
     def _load_default_hv_config(self) -> HVPowerConfig:
         path = self.DEFAULT_HV_CONFIG_PATH
