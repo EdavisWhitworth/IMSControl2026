@@ -225,6 +225,9 @@ class MainWindow(QMainWindow):
         chooser.addWidget(QLabel("Display iteration:"))
         self.iteration_selector = QComboBox()
         chooser.addWidget(self.iteration_selector)
+        self.follow_latest_checkbox = QCheckBox("Follow latest")
+        self.follow_latest_checkbox.setChecked(True)
+        chooser.addWidget(self.follow_latest_checkbox)
         chooser.addStretch()
         line_layout.addLayout(chooser)
 
@@ -308,7 +311,8 @@ class MainWindow(QMainWindow):
         self.btn_save_csv.clicked.connect(self.save_csv)
         self.btn_save_h5.clicked.connect(self.save_hdf5)
         self.btn_load_h5.clicked.connect(self.load_hdf5)
-        self.iteration_selector.currentIndexChanged.connect(self.update_line_plot)
+        self.iteration_selector.currentIndexChanged.connect(self._on_iteration_selector_changed)
+        self.follow_latest_checkbox.toggled.connect(self.update_line_plot)
 
         self.pressure_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.temperature_spinbox.valueChanged.connect(self._on_parameter_changed)
@@ -879,9 +883,22 @@ class MainWindow(QMainWindow):
         self.iteration_selector.blockSignals(False)
         self.update_line_plot()
 
+    def _on_iteration_selector_changed(self) -> None:
+        """Called when user manually changes the iteration selector."""
+        if self.follow_latest_checkbox.isChecked():
+            self.follow_latest_checkbox.blockSignals(True)
+            self.follow_latest_checkbox.setChecked(False)
+            self.follow_latest_checkbox.blockSignals(False)
+        self.update_line_plot()
+
     def _append_iteration_selector(self, iteration: int, refresh_plot: bool = True) -> None:
         previous_count = self.iteration_selector.count()
-        was_showing_latest = previous_count == 0 or self.iteration_selector.currentIndex() == (previous_count - 1)
+        follow_latest = self.follow_latest_checkbox.isChecked()
+        was_showing_latest = (
+            previous_count == 0
+            or self.iteration_selector.currentIndex() == (previous_count - 1)
+            or follow_latest
+        )
 
         self.iteration_selector.blockSignals(True)
         for value in range(previous_count + 1, iteration + 1):
@@ -917,8 +934,11 @@ class MainWindow(QMainWindow):
             self._hide_peak_overlays()
             return
 
-        idx = max(0, self.iteration_selector.currentIndex())
-        idx = min(idx, self.experiment_data.iteration_count() - 1)
+        if self.follow_latest_checkbox.isChecked():
+            idx = self.experiment_data.iteration_count() - 1
+        else:
+            idx = max(0, self.iteration_selector.currentIndex())
+            idx = min(idx, self.experiment_data.iteration_count() - 1)
         y = self.experiment_data.get_iteration(idx)
         x = self._time_axis(y.shape[0])
         self._current_line_x = x
@@ -1238,10 +1258,20 @@ class MainWindow(QMainWindow):
         else:
             refresh_every = 100
 
-        should_refresh_plots = iteration % refresh_every == 0 or iteration == self.config.total_iterations
-        should_refresh_selector = should_refresh_plots or iteration == 1
+        should_refresh_heatmap = (
+            iteration == 1
+            or iteration % refresh_every == 0
+            or iteration == self.config.total_iterations
+        )
+        should_refresh_selector = should_refresh_heatmap or iteration == 1
         if should_refresh_selector:
-            self._append_iteration_selector(iteration, refresh_plot=should_refresh_plots)
+            self._append_iteration_selector(iteration, refresh_plot=False)
+
+        # Always update the line plot when follow-latest is on; otherwise throttle it
+        if self.follow_latest_checkbox.isChecked():
+            self.update_line_plot()
+        elif should_refresh_heatmap:
+            self.update_line_plot()
 
         y_min = float(np.min(y))
         y_max = float(np.max(y))
@@ -1250,7 +1280,7 @@ class MainWindow(QMainWindow):
         if self._heat_z_max is None or y_max > self._heat_z_max:
             self._heat_z_max = y_max
 
-        if should_refresh_plots:
+        if should_refresh_heatmap:
             self.update_heatmap()
 
         self.status_label.setText(f"Status: Iteration {iteration} complete")
