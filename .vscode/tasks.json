@@ -4,7 +4,7 @@
 		{
 			"label": "Validate IMS Project",
 			"type": "shell",
-			"command": "d:/OneDrive/OneDrive - Whitworth University/Documents/GitHub/IMSSoftare2026/.venv/Scripts/python.exe",
+		"command": "d:/OneDrive/OneDrive - Whitworth University/Documents/GitHub/IMSSOFTWARE2026/.venv/Scripts/python.exe",
 			"args": [
 				"-m",
 				"compileall",
