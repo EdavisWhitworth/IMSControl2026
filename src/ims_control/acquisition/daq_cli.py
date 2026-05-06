@@ -68,18 +68,11 @@ def _ftims_transform_to_mobility(frequency_domain_data: dict) -> np.ndarray:
     # Sort frequencies
     frequencies = sorted(frequency_domain_data.keys())
     
-    # Apply FFT to each frequency's time-domain signal independently
-    spectra = []
-    for freq in frequencies:
-        signal = frequency_domain_data[freq]
-        # Apply FFT to transform to mobility domain
-        fft_result = np.fft.fft(signal)
-        magnitude_spectrum = np.abs(fft_result)
-        # Keep only the positive frequencies (first half of FFT output)
-        spectra.append(magnitude_spectrum[:len(magnitude_spectrum) // 2])
-    
-    # Average the spectra across all frequencies to produce a single mobility-domain spectrum
-    result = np.mean(spectra, axis=0)
+    # Build a stepped-frequency raw spectrum (one scalar per frequency),
+    # then FFT that spectrum.
+    raw_spectrum = np.asarray([float(np.mean(np.asarray(frequency_domain_data[f]))) for f in frequencies], dtype=np.float64)
+    fft_result = np.fft.fft(raw_spectrum)
+    result = np.abs(fft_result)
     
     return result
 
@@ -120,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             start_freq = float(payload.get("ftims_start_frequency_hz", 10.0))
             freq_step = float(payload.get("ftims_frequency_step_hz", 5.0))
             end_freq = float(payload.get("ftims_end_frequency_hz", 4000.0))
-            time_per_freq = float(payload.get("ftims_time_per_frequency_ms", 1000.0))
+            time_per_freq = (float(averages_per_iteration) / max(1e-9, start_freq)) * 1000.0
             
             # Generate frequency list for display
             frequencies = []
@@ -132,31 +125,37 @@ def main(argv: list[str] | None = None) -> int:
 
             for iteration in range(1, total_iterations + 1):
                 freq_domain_acc: dict | None = None
-                raw_time_domain_data: dict = {}  # Store raw time-domain per frequency
+                raw_spectrum_points: dict[float, float] = {}
 
-                for avg_idx in range(1, averages_per_iteration + 1):
-                    # Acquire stepped FTIMS frequency-domain data
-                    freq_domain_scan = daq.acquire_scan_stepped_ftims(
-                        start_frequency_hz=start_freq,
-                        frequency_step_hz=freq_step,
-                        end_frequency_hz=end_freq,
-                        time_per_frequency_ms=time_per_freq,
-                    )
-                    
-                    # Store raw time-domain data for first average (for display)
-                    if avg_idx == 1:
-                        raw_time_domain_data = {f: np.copy(sig) for f, sig in freq_domain_scan.items()}
+                for freq in frequencies:
+                    point_sum = 0.0
+                    for avg_idx in range(1, averages_per_iteration + 1):
+                        step_signal = daq.acquire_ftims_frequency_step(
+                            frequency_hz=freq,
+                            time_per_frequency_ms=time_per_freq,
+                        )
 
-                    # Accumulate frequency-domain data across averages
-                    if freq_domain_acc is None:
-                        freq_domain_acc = {f: np.copy(sig) for f, sig in freq_domain_scan.items()}
-                    else:
-                        for freq in freq_domain_scan:
-                            if freq in freq_domain_acc:
-                                freq_domain_acc[freq] += freq_domain_scan[freq]
+                        step_signal_arr = np.asarray(step_signal, dtype=np.float64)
+                        point_sum += float(np.mean(step_signal_arr))
+                        running_avg_point = point_sum / float(avg_idx)
 
-                    # Emit progress for each frequency that was just scanned in this average
-                    for freq in sorted(freq_domain_scan.keys()):
+                        _emit(
+                            {
+                                "type": "ftims_raw_step",
+                                "iteration": iteration,
+                                "frequency_hz": freq,
+                                "avg_count": avg_idx,
+                                "avg_total": averages_per_iteration,
+                                "data": [running_avg_point],
+                                "point_value": running_avg_point,
+                            }
+                        )
+
+                        if freq_domain_acc is None:
+                            freq_domain_acc = {f: np.zeros_like(step_signal_arr, dtype=np.float64) for f in frequencies}
+
+                        freq_domain_acc[freq] += step_signal_arr
+
                         _emit(
                             {
                                 "type": "progress",
@@ -168,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
                                 "total_frequencies": total_frequencies,
                             }
                         )
+
+                    raw_spectrum_points[freq] = point_sum / float(averages_per_iteration)
 
                 if freq_domain_acc is None:
                     continue
@@ -190,11 +191,11 @@ def main(argv: list[str] | None = None) -> int:
                         "type": "iteration",
                         "iteration": iteration,
                         "data": mobility_spectrum.tolist(),
+                        "raw_spectrum_points": {
+                            str(f): float(raw_spectrum_points[f]) for f in sorted(raw_spectrum_points.keys())
+                        },
                         "frequency_domain_data": {
                             str(f): sig.tolist() for f, sig in freq_domain_acc.items()
-                        },
-                        "raw_time_domain_data": {
-                            str(f): sig.tolist() for f, sig in raw_time_domain_data.items()
                         },
                         "peak_metrics": peak_metrics,
                     }

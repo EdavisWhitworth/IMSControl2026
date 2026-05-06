@@ -20,6 +20,7 @@ class FTIMSConfig:
     start_frequency_hz: float = 10.0
     frequency_step_hz: float = 5.0
     end_frequency_hz: float = 4000.0
+    # Backward-compatibility field. UI no longer edits this directly.
     time_per_frequency_ms: float = 1000.0
     enable_fft: bool = True
 
@@ -38,16 +39,32 @@ class FTIMSConfig:
 
     def frequency_steps(self) -> List[float]:
         """Generate list of frequency steps from start to end."""
-        num_steps = int((self.end_frequency_hz - self.start_frequency_hz) / self.frequency_step_hz) + 1
-        return [self.start_frequency_hz + i * self.frequency_step_hz for i in range(num_steps)]
+        if self.frequency_step_hz <= 0:
+            return []
+        steps: List[float] = []
+        freq = float(self.start_frequency_hz)
+        stop = float(self.end_frequency_hz)
+        while freq <= stop + 1e-9:
+            steps.append(freq)
+            freq += float(self.frequency_step_hz)
+        return steps
 
     def total_frequencies(self) -> int:
         """Calculate total number of frequency steps."""
         return len(self.frequency_steps())
 
-    def estimated_duration_seconds(self) -> float:
-        """Estimate total acquisition duration in seconds."""
-        return (self.total_frequencies() * self.time_per_frequency_ms) / 1000.0
+    def step_duration_seconds(self, averages_per_iteration: int) -> float:
+        """Per-frequency dwell time derived from initial frequency and averages."""
+        start_hz = max(1e-9, float(self.start_frequency_hz))
+        avg_count = max(1, int(averages_per_iteration))
+        return avg_count / start_hz
+
+    def step_duration_ms(self, averages_per_iteration: int) -> float:
+        return 1000.0 * self.step_duration_seconds(averages_per_iteration)
+
+    def estimated_duration_seconds(self, averages_per_iteration: int) -> float:
+        """Estimate one-iteration FTIMS sweep duration in seconds."""
+        return self.total_frequencies() * self.step_duration_seconds(averages_per_iteration)
 
 
 @dataclass
@@ -144,13 +161,9 @@ class ExperimentData:
         self.frequency_domain_iterations: List[Dict[float, np.ndarray]] = []
         self.frequency_bins: List[float] = []
         
-        # Matrix dimensions depend on mode
-        if config.operation_mode == OperationMode.DTIMS:
-            # DTIMS: (iterations, data_points)
-            self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
-        else:
-            # FTIMS: (iterations, data_points for FFT output)
-            self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
+        # Matrix dimensions depend on mode, but FTIMS can renegotiate point count
+        # at first iteration to match stepped-spectrum FFT length.
+        self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
 
     def reset(self, config: ExperimentConfig | None = None) -> None:
         if config is not None:
@@ -161,20 +174,26 @@ class ExperimentData:
         self.frequency_domain_iterations.clear()
         self.frequency_bins.clear()
         
-        if config.operation_mode == OperationMode.DTIMS:
-            self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
-        else:
-            self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
+        self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
 
     def _ensure_capacity(self, required_rows: int) -> None:
         if required_rows <= self._matrix.shape[0]:
             return
         new_rows = max(required_rows, self._matrix.shape[0] * 2)
-        new_matrix = np.empty((new_rows, self.config.data_points), dtype=np.float64)
+        new_matrix = np.empty((new_rows, self._matrix.shape[1]), dtype=np.float64)
         current_rows = self.iteration_count()
         if current_rows > 0:
             new_matrix[:current_rows, :] = self._matrix[:current_rows, :]
         self._matrix = new_matrix
+
+    def _resize_point_count(self, point_count: int) -> None:
+        new_cols = max(1, int(point_count))
+        current_rows = self.iteration_count()
+        new_matrix = np.empty((max(1, self._matrix.shape[0]), new_cols), dtype=np.float64)
+        if current_rows > 0 and self._matrix.shape[1] == new_cols:
+            new_matrix[:current_rows, :] = self._matrix[:current_rows, :]
+        self._matrix = new_matrix
+        self.config.data_points = new_cols
 
     def add_iteration(self, y: np.ndarray, frequency_domain_data: Optional[Dict[float, np.ndarray]] = None) -> None:
         """
@@ -185,10 +204,13 @@ class ExperimentData:
             frequency_domain_data: (FTIMS only) Dict mapping frequency → accumulated signal
         """
         y_arr = np.asarray(y, dtype=np.float64)
-        if y_arr.shape[0] != self.config.data_points:
-            raise ValueError(
-                f"Iteration length {y_arr.shape[0]} does not match expected {self.config.data_points}."
-            )
+        if y_arr.shape[0] != self._matrix.shape[1]:
+            if self.config.operation_mode == OperationMode.FTIMS and self.iteration_count() == 0:
+                self._resize_point_count(y_arr.shape[0])
+            else:
+                raise ValueError(
+                    f"Iteration length {y_arr.shape[0]} does not match expected {self._matrix.shape[1]}."
+                )
 
         row_index = self.iteration_count()
         self._ensure_capacity(row_index + 1)

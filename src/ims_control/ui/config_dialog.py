@@ -87,11 +87,6 @@ class ExperimentConfigDialog(QDialog):
         self.end_frequency_hz.setRange(10.0, 10000.0)
         self.end_frequency_hz.setValue(ftims_cfg.end_frequency_hz)
 
-        self.time_per_frequency_ms = QDoubleSpinBox()
-        self.time_per_frequency_ms.setDecimals(0)
-        self.time_per_frequency_ms.setRange(100.0, 10000.0)
-        self.time_per_frequency_ms.setValue(ftims_cfg.time_per_frequency_ms)
-
         self.frequency_info = QLabel()
         self._update_frequency_info()
 
@@ -111,7 +106,6 @@ class ExperimentConfigDialog(QDialog):
         ftims_form.addRow("Start frequency (Hz)", self.start_frequency_hz)
         ftims_form.addRow("Frequency step (Hz)", self.frequency_step_hz)
         ftims_form.addRow("End frequency (Hz)", self.end_frequency_hz)
-        ftims_form.addRow("Time per frequency (ms)", self.time_per_frequency_ms)
         ftims_form.addRow("", self.frequency_info)
         self.ftims_group.setLayout(ftims_form)
 
@@ -140,7 +134,8 @@ class ExperimentConfigDialog(QDialog):
         self.start_frequency_hz.valueChanged.connect(self._update_frequency_info)
         self.frequency_step_hz.valueChanged.connect(self._update_frequency_info)
         self.end_frequency_hz.valueChanged.connect(self._update_frequency_info)
-        self.time_per_frequency_ms.valueChanged.connect(self._update_frequency_info)
+        self.averages.valueChanged.connect(self._update_frequency_info)
+        self.iterations.valueChanged.connect(self._update_frequency_info)
 
         # Initial visibility
         self._on_mode_changed()
@@ -158,12 +153,14 @@ class ExperimentConfigDialog(QDialog):
                 start_frequency_hz=self.start_frequency_hz.value(),
                 frequency_step_hz=self.frequency_step_hz.value(),
                 end_frequency_hz=self.end_frequency_hz.value(),
-                time_per_frequency_ms=self.time_per_frequency_ms.value(),
             )
             num_steps = ftims_cfg.total_frequencies()
-            duration_sec = ftims_cfg.estimated_duration_seconds()
+            step_sec = ftims_cfg.step_duration_seconds(self.averages.value())
+            duration_sec = ftims_cfg.estimated_duration_seconds(self.averages.value())
+            total_duration_sec = duration_sec * float(self.iterations.value())
             self.frequency_info.setText(
-                f"Frequency steps: {num_steps}  |  Est. duration: {duration_sec:.1f}s"
+                f"Frequency steps: {num_steps}  |  Step time: {step_sec:.3f}s  |  "
+                f"Est. sweep: {duration_sec:.1f}s  |  Est. total: {total_duration_sec:.1f}s"
             )
         except Exception:
             self.frequency_info.setText("Invalid frequency configuration")
@@ -175,14 +172,15 @@ class ExperimentConfigDialog(QDialog):
             start_frequency_hz=self.start_frequency_hz.value(),
             frequency_step_hz=self.frequency_step_hz.value(),
             end_frequency_hz=self.end_frequency_hz.value(),
-            time_per_frequency_ms=self.time_per_frequency_ms.value(),
         ) if mode == OperationMode.FTIMS else FTIMSConfig()
 
         # For FTIMS mode, set pulse_width_ms to 50% of time_per_frequency_ms for proper duty cycle
         # For DTIMS mode, use the configured pulse_width_ms
         if mode == OperationMode.FTIMS:
-            pulse_width = ftims_config.time_per_frequency_ms / 2.0
-            experiment_length = ftims_config.time_per_frequency_ms
+            step_ms = ftims_config.step_duration_ms(self.averages.value())
+            pulse_width = step_ms / 2.0
+            experiment_length = step_ms
+            ftims_config.time_per_frequency_ms = step_ms
         else:
             pulse_width = float(self.pulse_width_ms.value())
             experiment_length = float(self.experiment_length_ms.value())

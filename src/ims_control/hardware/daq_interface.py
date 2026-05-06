@@ -403,57 +403,65 @@ class NiUSB6351Controller:
         frequency_domain_data: dict[float, np.ndarray] = {}
         
         for freq in frequencies:
-            # Calculate samples needed for this frequency at given duration
-            samples_needed = int((time_per_frequency_ms / 1000.0) * self.config.sample_rate_hz)
-            if samples_needed < 1:
-                samples_needed = 1
-            
-            if not self.available:
-                # Simulation mode: generate synthetic frequency-domain signal
-                freq_data = self._simulate_ftims_frequency_scan(freq, samples_needed)
-            else:
-                # Hardware mode: collect real data
-                if self._ai_task is None or self._co_task is None:
-                    self.open()
-                
-                if self._ai_task is None or self._co_task is None:
-                    raise RuntimeError("DAQ tasks not initialized properly")
-                
-                try:
-                    # Reconfigure counter output to the current FTIMS step frequency.
-                    self._set_counter_frequency(freq, duty_cycle=0.5)
-                    
-                    # Software-timed delay: 100ms per article to establish frequency
-                    time.sleep(0.1)
-                    
-                    # Create a temporary AI task scoped to this frequency step
-                    temp_ai_task = nidaqmx.Task()
-                    try:
-                        temp_ai_task.ai_channels.add_ai_voltage_chan(
-                            self.config.ai_channel,
-                            terminal_config=TerminalConfiguration.RSE,
-                        )
-                        
-                        temp_ai_task.timing.cfg_samp_clk_timing(
-                            rate=self.config.sample_rate_hz,
-                            sample_mode=AcquisitionType.FINITE,
-                            samps_per_chan=samples_needed,
-                        )
-                        
-                        temp_ai_task.start()
-                        freq_data = np.asarray(
-                            temp_ai_task.read(number_of_samples_per_channel=samples_needed),
-                            dtype=np.float64
-                        )
-                        temp_ai_task.stop()
-                    finally:
-                        temp_ai_task.close()
-                except Exception as e:
-                    raise RuntimeError(f"FTIMS acquisition failed at {freq} Hz: {e}") from e
+            freq_data = self.acquire_ftims_frequency_step(
+                frequency_hz=freq,
+                time_per_frequency_ms=time_per_frequency_ms,
+            )
             
             frequency_domain_data[freq] = freq_data
         
         return frequency_domain_data
+
+    def acquire_ftims_frequency_step(self, frequency_hz: float, time_per_frequency_ms: float) -> np.ndarray:
+        """Acquire one FTIMS frequency step and return its time-domain signal."""
+        import time
+
+        # Keep per-step length fixed to configured data_points so downstream
+        # FFT output and UI storage dimensions always match.
+        samples_needed = max(1, int(self.config.data_points))
+
+        if not self.available:
+            return self._simulate_ftims_frequency_scan(float(frequency_hz), samples_needed)
+
+        if self._ai_task is None or self._co_task is None:
+            self.open()
+
+        if self._ai_task is None or self._co_task is None:
+            raise RuntimeError("DAQ tasks not initialized properly")
+
+        try:
+            # Reconfigure counter output to the current FTIMS step frequency.
+            self._set_counter_frequency(float(frequency_hz), duty_cycle=0.5)
+
+            # Software-timed delay: 100ms per article to establish frequency.
+            _ = float(time_per_frequency_ms)  # reserved for future timing policy
+            time.sleep(0.1)
+
+            # Create a temporary AI task scoped to this frequency step.
+            temp_ai_task = nidaqmx.Task()
+            try:
+                temp_ai_task.ai_channels.add_ai_voltage_chan(
+                    self.config.ai_channel,
+                    terminal_config=TerminalConfiguration.RSE,
+                )
+
+                temp_ai_task.timing.cfg_samp_clk_timing(
+                    rate=self.config.sample_rate_hz,
+                    sample_mode=AcquisitionType.FINITE,
+                    samps_per_chan=samples_needed,
+                )
+
+                temp_ai_task.start()
+                freq_data = np.asarray(
+                    temp_ai_task.read(number_of_samples_per_channel=samples_needed),
+                    dtype=np.float64,
+                )
+                temp_ai_task.stop()
+            finally:
+                temp_ai_task.close()
+            return freq_data
+        except Exception as e:
+            raise RuntimeError(f"FTIMS acquisition failed at {float(frequency_hz)} Hz: {e}") from e
 
     def _simulate_ftims_frequency_scan(self, frequency_hz: float, samples: int) -> np.ndarray:
         """Generate synthetic frequency-domain data for simulation mode."""

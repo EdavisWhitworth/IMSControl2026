@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from ims_control.data_model.experiment import ExperimentConfig
 class AcquisitionWorker(QThread):
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, int, int, float, int)  # iteration, total_iterations, avg_count, avg_total, current_frequency_hz (or 0), total_frequencies
+    ftims_raw_step = pyqtSignal(float, object)  # frequency_hz, np.ndarray signal
     iteration_ready = pyqtSignal(int, object, dict)  # iteration index (1-based), np.ndarray, metadata dict
     finished_ok = pyqtSignal()
     failed = pyqtSignal(str)
@@ -24,6 +26,18 @@ class AcquisitionWorker(QThread):
         self.config = config
         self._stop_requested = False
         self._proc: subprocess.Popen[str] | None = None
+        self._debug_log_path = Path.home() / "ims_ftims_debug.log"
+        self._debug_events_written = 0
+
+    def _debug_log(self, message: str) -> None:
+        """Append a short worker diagnostic line (best-effort)."""
+        try:
+            ts = datetime.now().isoformat(timespec="seconds")
+            self._debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._debug_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"{ts} {message}\n")
+        except Exception:
+            pass
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -35,6 +49,11 @@ class AcquisitionWorker(QThread):
 
     def run(self) -> None:
         src_dir = Path(__file__).resolve().parents[2]
+        self._debug_events_written = 0
+        self._debug_log(
+            f"worker_start mode={getattr(self.config.operation_mode, 'value', self.config.operation_mode)} "
+            f"python={sys.executable} src_dir={src_dir}"
+        )
         payload = {
             "ai_channel": self.config.ai_channel,
             "counter_channel": self.config.counter_channel,
@@ -55,7 +74,6 @@ class AcquisitionWorker(QThread):
                 "ftims_start_frequency_hz": self.config.ftims_config.start_frequency_hz,
                 "ftims_frequency_step_hz": self.config.ftims_config.frequency_step_hz,
                 "ftims_end_frequency_hz": self.config.ftims_config.end_frequency_hz,
-                "ftims_time_per_frequency_ms": self.config.ftims_config.time_per_frequency_ms,
             })
 
         cmd = [
@@ -101,6 +119,13 @@ class AcquisitionWorker(QThread):
                 if event_type == "status":
                     self.status.emit(str(event.get("message", "")))
                 elif event_type == "progress":
+                    if self._debug_events_written < 120:
+                        self._debug_log(
+                            "progress "
+                            f"iter={event.get('iteration')} avg={event.get('avg_count')}/{event.get('avg_total')} "
+                            f"freq={event.get('current_frequency_hz')} total_freq={event.get('total_frequencies')}"
+                        )
+                        self._debug_events_written += 1
                     self.progress.emit(
                         int(event.get("iteration", 0)),
                         int(event.get("total_iterations", 0)),
@@ -112,19 +137,39 @@ class AcquisitionWorker(QThread):
                 elif event_type == "iteration":
                     iteration = int(event.get("iteration", 0))
                     data = np.asarray(event.get("data", []), dtype=np.float64)
+                    raw_td = event.get("raw_time_domain_data", {})
+                    freq_dom = event.get("frequency_domain_data", {})
+                    if self._debug_events_written < 160:
+                        self._debug_log(
+                            "iteration "
+                            f"iter={iteration} data_len={data.shape[0]} "
+                            f"raw_keys={len(raw_td) if isinstance(raw_td, dict) else -1} "
+                            f"freq_keys={len(freq_dom) if isinstance(freq_dom, dict) else -1}"
+                        )
+                        self._debug_events_written += 1
                     
                     # Extract FTIMS-specific metadata if available
                     metadata = {
                         "raw_time_domain_data": event.get("raw_time_domain_data", {}),
+                        "raw_spectrum_points": event.get("raw_spectrum_points", {}),
                         "frequency_domain_data": event.get("frequency_domain_data", {}),
                         "peak_metrics": event.get("peak_metrics", {}),
                     }
                     
                     self.iteration_ready.emit(iteration, data, metadata)
+                elif event_type == "ftims_raw_step":
+                    try:
+                        freq_hz = float(event.get("frequency_hz", 0.0))
+                        signal = np.asarray(event.get("data", []), dtype=np.float64)
+                        self.ftims_raw_step.emit(freq_hz, signal)
+                    except Exception:
+                        pass
                 elif event_type == "finished":
+                    self._debug_log("worker_finished")
                     self.finished_ok.emit()
                     return
                 elif event_type == "failed":
+                    self._debug_log(f"worker_failed error={event.get('error', 'unknown')}")
                     self.failed.emit(str(event.get("error", "Unknown acquisition error")))
                     return
 
@@ -141,8 +186,10 @@ class AcquisitionWorker(QThread):
                         stderr_text = self._proc.stderr.read().strip()
                     self.failed.emit(stderr_text or f"Acquisition subprocess exited with code {exit_code}")
                 else:
+                    self._debug_log("worker_finished_exit_code_0")
                     self.finished_ok.emit()
         except Exception as exc:  # pragma: no cover
+            self._debug_log(f"worker_exception {type(exc).__name__}: {exc}")
             self.failed.emit(f"Unexpected error: {type(exc).__name__}: {exc}")
         finally:
             if self._proc is not None:
