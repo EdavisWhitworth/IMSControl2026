@@ -518,6 +518,8 @@ class MainWindow(QMainWindow):
         self.btn_load_h5.clicked.connect(self.load_hdf5)
         self.iteration_selector.currentIndexChanged.connect(self._on_iteration_selector_changed)
         self.follow_latest_checkbox.toggled.connect(self.update_line_plot)
+        if self.ftims_frequency_selector is not None:
+            self.ftims_frequency_selector.currentIndexChanged.connect(self._on_ftims_frequency_changed)
 
         self.pressure_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.temperature_spinbox.valueChanged.connect(self._on_parameter_changed)
@@ -551,8 +553,15 @@ class MainWindow(QMainWindow):
         self._on_auto_axis_toggled("line")
         self._on_auto_axis_toggled("heat")
         self._on_auto_axis_toggled("selected")
+        self._on_auto_axis_toggled("ftims_raw")
 
         self._refresh_iteration_selector()
+
+    def _apply_mode_ui_state(self) -> None:
+        """Apply FTIMS/DTIMS visibility and labels after mode changes."""
+        is_ftims = self.config.operation_mode == OperationMode.FTIMS
+        if self.plot_tabs is not None and self.plot_tabs.count() > 3:
+            self.plot_tabs.setTabVisible(3, is_ftims)
 
     def _refresh_hv_control_states(self) -> None:
         hv_busy = self.hv_worker is not None and self.hv_worker.isRunning()
@@ -1768,9 +1777,8 @@ class MainWindow(QMainWindow):
             self.ftims_frequency_selector.addItem(f"{freq:.1f} Hz", freq)
         self.ftims_frequency_selector.blockSignals(False)
         
-        # Connect to handle frequency selection changes
+        # Select first available frequency for immediate display.
         if self.ftims_frequency_selector.count() > 0:
-            self.ftims_frequency_selector.currentIndexChanged.connect(self._on_ftims_frequency_changed)
             self.ftims_frequency_selector.setCurrentIndex(0)
             self._on_ftims_frequency_changed(0)
 
@@ -1801,6 +1809,7 @@ class MainWindow(QMainWindow):
             self.experiment_data.reset(self.config)
             self._selected_heat_iteration_index = None
             self._refresh_config_label()
+            self._apply_mode_ui_state()
             self._refresh_iteration_selector()
             self.update_heatmap(force_levels=True)
             if self.hv_enabled:
@@ -1842,6 +1851,14 @@ class MainWindow(QMainWindow):
         self._time_axis_cache = np.array([], dtype=np.float64)
         self._heat_z_min = None
         self._heat_z_max = None
+        self._ftims_raw_time_domain_data.clear()
+        if self.ftims_raw_curve is not None:
+            self.ftims_raw_curve.setData([], [])
+        if self.ftims_frequency_selector is not None:
+            self.ftims_frequency_selector.blockSignals(True)
+            self.ftims_frequency_selector.clear()
+            self.ftims_frequency_selector.blockSignals(False)
+        self._apply_mode_ui_state()
         self._refresh_iteration_selector()
         self.update_heatmap(force_levels=True)
 
@@ -1869,7 +1886,7 @@ class MainWindow(QMainWindow):
     def on_progress(self, iteration: int, total_iterations: int, avg_count: int, avg_total: int, current_frequency_hz: float | None = None, total_frequencies: int | None = None) -> None:
         is_ftims = self.config.operation_mode == OperationMode.FTIMS
         
-        if is_ftims and current_frequency_hz is not None and total_frequencies is not None:
+        if is_ftims and current_frequency_hz is not None:
             # FTIMS mode: show frequency and average at that frequency
             self.progress_label.setText(
                 f"Iteration: {iteration}/{total_iterations} | Frequency: {current_frequency_hz:.1f} Hz | Average: {avg_count}/{avg_total}"

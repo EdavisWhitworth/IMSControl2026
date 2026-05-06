@@ -284,6 +284,48 @@ class NiUSB6351Controller:
             self._counter_started = False
         self._counter_writer = None
 
+    def _set_counter_frequency(self, frequency_hz: float, duty_cycle: float = 0.5) -> None:
+        """Reconfigure counter output for a specific FTIMS step frequency."""
+        if not self.available:
+            return
+        if nidaqmx is None:
+            raise RuntimeError("nidaqmx is not available")
+
+        freq = max(1e-6, float(frequency_hz))
+        duty = min(0.999999, max(1e-6, float(duty_cycle)))
+
+        # Stop and replace the counter task so new frequency settings take effect.
+        if self._co_task is not None:
+            try:
+                if self._counter_started:
+                    self._co_task.stop()
+            except Exception:
+                pass
+            try:
+                self._co_task.close()
+            except Exception:
+                pass
+            self._co_task = None
+            self._counter_started = False
+
+        co_task = nidaqmx.Task()
+        try:
+            co_task.co_channels.add_co_pulse_chan_freq(
+                counter=self.config.counter_channel.strip(),
+                freq=freq,
+                duty_cycle=duty,
+            )
+            co_task.timing.cfg_implicit_timing(sample_mode=AcquisitionType.CONTINUOUS)
+            co_task.start()
+            self._co_task = co_task
+            self._counter_started = True
+        except Exception:
+            try:
+                co_task.close()
+            except Exception:
+                pass
+            raise
+
     def acquire_scan(self) -> np.ndarray:
         if not self.available:
             return self._simulate_scan()
@@ -378,10 +420,8 @@ class NiUSB6351Controller:
                     raise RuntimeError("DAQ tasks not initialized properly")
                 
                 try:
-                    # Keep counter running continuously for stable pulse spacing
-                    if not self._counter_started:
-                        self._co_task.start()
-                        self._counter_started = True
+                    # Reconfigure counter output to the current FTIMS step frequency.
+                    self._set_counter_frequency(freq, duty_cycle=0.5)
                     
                     # Software-timed delay: 100ms per article to establish frequency
                     time.sleep(0.1)
