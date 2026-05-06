@@ -56,25 +56,32 @@ def _ftims_transform_to_mobility(frequency_domain_data: dict) -> np.ndarray:
     """
     Transform frequency-domain data to mobility-domain using FFT.
     
+    Applies FFT independently to each frequency's time-domain signal,
+    then averages the resulting mobility-domain spectra across frequencies.
+    
     Args:
-        frequency_domain_data: Dict mapping frequency (Hz) → accumulated signal
+        frequency_domain_data: Dict mapping frequency (Hz) → time-domain signal at that frequency
         
     Returns:
-        FFT-transformed spectrum as np.ndarray
+        FFT-transformed and averaged spectrum as np.ndarray
     """
-    # Sort frequencies and extract signals in order
+    # Sort frequencies
     frequencies = sorted(frequency_domain_data.keys())
-    signals = [frequency_domain_data[f] for f in frequencies]
     
-    # Concatenate all frequency-domain signals into a single time series
-    time_domain = np.concatenate(signals)
+    # Apply FFT to each frequency's time-domain signal independently
+    spectra = []
+    for freq in frequencies:
+        signal = frequency_domain_data[freq]
+        # Apply FFT to transform to mobility domain
+        fft_result = np.fft.fft(signal)
+        magnitude_spectrum = np.abs(fft_result)
+        # Keep only the positive frequencies (first half of FFT output)
+        spectra.append(magnitude_spectrum[:len(magnitude_spectrum) // 2])
     
-    # Apply FFT to transform to mobility domain
-    fft_result = np.fft.fft(time_domain)
-    magnitude_spectrum = np.abs(fft_result)
+    # Average the spectra across all frequencies to produce a single mobility-domain spectrum
+    result = np.mean(spectra, axis=0)
     
-    # Return only the positive frequencies (first half of FFT output)
-    return magnitude_spectrum[:len(magnitude_spectrum) // 2]
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

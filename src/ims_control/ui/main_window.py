@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ims_control.acquisition.worker_thread import AcquisitionWorker
-from ims_control.data_model.experiment import ExperimentConfig, ExperimentData, HVPowerConfig
+from ims_control.data_model.experiment import ExperimentConfig, ExperimentData, HVPowerConfig, OperationMode
 from ims_control.hardware.daq_interface import DaqConfig, NiUSB6351Controller
 from ims_control.io.export_import import ExperimentExporter, ExperimentImporter
 from ims_control.ui.config_dialog import ExperimentConfigDialog
@@ -383,9 +383,15 @@ class MainWindow(QMainWindow):
         chooser.addStretch()
         line_layout.addLayout(chooser)
 
-        self.line_plot = pg.PlotWidget(title="IMS Signal")
-        self.line_plot.setLabel("left", "Signal")
-        self.line_plot.setLabel("bottom", "Time (ms)")
+        # Line plot title and labels depend on mode
+        is_ftims = self.config.operation_mode == OperationMode.FTIMS
+        plot_title = "FTIMS Mobility-Domain Spectrum" if is_ftims else "IMS Signal"
+        y_label = "Intensity" if is_ftims else "Signal"
+        x_label = "m/z or reduced mobility" if is_ftims else "Time (ms)"
+        
+        self.line_plot = pg.PlotWidget(title=plot_title)
+        self.line_plot.setLabel("left", y_label)
+        self.line_plot.setLabel("bottom", x_label)
         self.line_curve = self.line_plot.plot(pen=pg.mkPen(width=2))
         self.line_baseline_curve = self.line_plot.plot(pen=pg.mkPen("r", width=3))
         self.line_cursor_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y", width=1))
@@ -409,8 +415,10 @@ class MainWindow(QMainWindow):
         heat_tab = QWidget()
         heat_layout = QVBoxLayout(heat_tab)
         self.heat_view = pg.GraphicsLayoutWidget()
-        self.heat_plot = self.heat_view.addPlot(title="Iterations Heatmap")
-        self.heat_plot.setLabel("left", "Time (ms)")
+        heat_title = "Frequency Heatmap (FTIMS)" if is_ftims else "Iterations Heatmap (DTIMS)"
+        heat_y_label = "Frequency (Hz)" if is_ftims else "Time (ms)"
+        self.heat_plot = self.heat_view.addPlot(title=heat_title)
+        self.heat_plot.setLabel("left", heat_y_label)
         self.heat_plot.setLabel("bottom", "Iteration")
         self.heat_img = pg.ImageItem()
         self.heat_plot.addItem(self.heat_img)
@@ -427,9 +435,11 @@ class MainWindow(QMainWindow):
 
         selected_tab = QWidget()
         selected_layout = QVBoxLayout(selected_tab)
-        self.line_plot_from_heat = pg.PlotWidget(title="IMS Signal (Selected from Heatmap)")
-        self.line_plot_from_heat.setLabel("left", "Signal")
-        self.line_plot_from_heat.setLabel("bottom", "Time (ms)")
+        selected_title = "Selected Frequency Spectrum (FTIMS)" if is_ftims else "IMS Signal (Selected from Heatmap)"
+        selected_x_label = "m/z or reduced mobility" if is_ftims else "Time (ms)"
+        self.line_plot_from_heat = pg.PlotWidget(title=selected_title)
+        self.line_plot_from_heat.setLabel("left", y_label)
+        self.line_plot_from_heat.setLabel("bottom", selected_x_label)
         self.line_curve_from_heat = self.line_plot_from_heat.plot(pen=pg.mkPen("w", width=2))
         self.selected_baseline_curve = self.line_plot_from_heat.plot(pen=pg.mkPen("r", width=3))
         self.selected_cursor_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y", width=1))
@@ -789,8 +799,8 @@ class MainWindow(QMainWindow):
         self.heat_lut.gradient.setColorMap(rainbow_cmap)
 
     def _update_ko(self) -> None:
-        """Calculate and update the reduced mobility (Ko) value."""
-        if self.ko_label is None:
+        """Calculate and update the reduced mobility (Ko) value (DTIMS only)."""
+        if self.ko_label is None or self.config.operation_mode == OperationMode.FTIMS:
             return
         
         drift_time_ms = self._current_cursor_x
@@ -1402,10 +1412,16 @@ class MainWindow(QMainWindow):
             self.update_line_plot()
 
     def _time_axis(self, point_count: int) -> np.ndarray:
-        if self._time_axis_cache.size != point_count:
-            max_time_ms = float(self.config.experiment_length_ms)
-            self._time_axis_cache = np.linspace(0.0, max_time_ms, point_count, endpoint=True)
-        return self._time_axis_cache
+        """Generate x-axis for plot based on operation mode."""
+        if self.config.operation_mode == OperationMode.FTIMS:
+            # For FTIMS, generate a generic spectral index axis (0 to data_points-1)
+            return np.arange(point_count, dtype=np.float64)
+        else:
+            # For DTIMS, generate time axis in milliseconds
+            if self._time_axis_cache.size != point_count:
+                max_time_ms = float(self.config.experiment_length_ms)
+                self._time_axis_cache = np.linspace(0.0, max_time_ms, point_count, endpoint=True)
+            return self._time_axis_cache
 
     def update_line_plot(self) -> None:
         if self.experiment_data.iteration_count() == 0:
@@ -1419,8 +1435,12 @@ class MainWindow(QMainWindow):
             self._selected_line_y = np.array([], dtype=np.float64)
             self._line_cursor_locked = False
             self._selected_cursor_locked = False
-            self.line_cursor_label.setText("Line cursor: x=-- ms, y=--")
-            self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+            cursor_label = "Line cursor: x=-- (Hz), y=--" if self.config.operation_mode == OperationMode.FTIMS else "Line cursor: x=-- ms, y=--"
+            self.line_cursor_label.setText(cursor_label)
+            if self.config.operation_mode == OperationMode.DTIMS:
+                self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+            else:
+                self.ko_label.setText("Peak metrics: --")
             self._clear_peak_readouts()
             self._hide_peak_overlays()
             return
@@ -1527,7 +1547,10 @@ class MainWindow(QMainWindow):
         self.line_cursor_v.setPos(x_val)
         self.line_cursor_h.setPos(y_val)
         status = " [LOCKED]" if self._line_cursor_locked else ""
-        self.line_cursor_label.setText(f"Line cursor: x={x_val:.4f} ms, y={y_val:.6f}{status}")
+        if self.config.operation_mode == OperationMode.FTIMS:
+            self.line_cursor_label.setText(f"Line cursor: x={x_val:.1f} (index), y={y_val:.6f}{status}")
+        else:
+            self.line_cursor_label.setText(f"Line cursor: x={x_val:.4f} ms, y={y_val:.6f}{status}")
 
     def _on_line_mouse_clicked(self, event) -> None:
         if self._current_line_x.size == 0:
@@ -1556,7 +1579,10 @@ class MainWindow(QMainWindow):
         else:
             self._hide_peak_overlays("line")
             if not self._active_cursor_locked():
-                self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+                if self.config.operation_mode == OperationMode.DTIMS:
+                    self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
+                else:
+                    self.ko_label.setText("Peak metrics: --")
                 self._clear_peak_readouts()
 
         base_text = self.line_cursor_label.text().split(" [")[0]
