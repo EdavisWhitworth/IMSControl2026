@@ -121,9 +121,18 @@ def main(argv: list[str] | None = None) -> int:
             freq_step = float(payload.get("ftims_frequency_step_hz", 5.0))
             end_freq = float(payload.get("ftims_end_frequency_hz", 4000.0))
             time_per_freq = float(payload.get("ftims_time_per_frequency_ms", 1000.0))
+            
+            # Generate frequency list for display
+            frequencies = []
+            f = start_freq
+            while f <= end_freq + 1e-6:
+                frequencies.append(f)
+                f += freq_step
+            total_frequencies = len(frequencies)
 
             for iteration in range(1, total_iterations + 1):
                 freq_domain_acc: dict | None = None
+                raw_time_domain_data: dict = {}  # Store raw time-domain per frequency
 
                 for avg_idx in range(1, averages_per_iteration + 1):
                     # Acquire stepped FTIMS frequency-domain data
@@ -133,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
                         end_frequency_hz=end_freq,
                         time_per_frequency_ms=time_per_freq,
                     )
+                    
+                    # Store raw time-domain data for first average (for display)
+                    if avg_idx == 1:
+                        raw_time_domain_data = {f: np.copy(sig) for f, sig in freq_domain_scan.items()}
 
                     # Accumulate frequency-domain data across averages
                     if freq_domain_acc is None:
@@ -142,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
                             if freq in freq_domain_acc:
                                 freq_domain_acc[freq] += freq_domain_scan[freq]
 
+                    # Emit progress with current frequency index
+                    current_freq_idx = avg_idx
                     _emit(
                         {
                             "type": "progress",
@@ -149,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
                             "total_iterations": total_iterations,
                             "avg_count": avg_idx,
                             "avg_total": averages_per_iteration,
+                            "current_frequency_hz": None,  # Will be set per-frequency in future
+                            "total_frequencies": total_frequencies,
                         }
                     )
 
@@ -175,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
                         "data": mobility_spectrum.tolist(),
                         "frequency_domain_data": {
                             str(f): sig.tolist() for f, sig in freq_domain_acc.items()
+                        },
+                        "raw_time_domain_data": {
+                            str(f): sig.tolist() for f, sig in raw_time_domain_data.items()
                         },
                         "peak_metrics": peak_metrics,
                     }

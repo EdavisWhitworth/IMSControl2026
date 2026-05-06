@@ -14,8 +14,8 @@ from ims_control.data_model.experiment import ExperimentConfig
 
 class AcquisitionWorker(QThread):
     status = pyqtSignal(str)
-    progress = pyqtSignal(int, int, int, int)  # iteration, total_iterations, avg_count, avg_total
-    iteration_ready = pyqtSignal(int, object)  # iteration index (1-based), np.ndarray
+    progress = pyqtSignal(int, int, int, int, float, int)  # iteration, total_iterations, avg_count, avg_total, current_frequency_hz (or 0), total_frequencies
+    iteration_ready = pyqtSignal(int, object, dict)  # iteration index (1-based), np.ndarray, metadata dict
     finished_ok = pyqtSignal()
     failed = pyqtSignal(str)
 
@@ -106,12 +106,21 @@ class AcquisitionWorker(QThread):
                         int(event.get("total_iterations", 0)),
                         int(event.get("avg_count", 0)),
                         int(event.get("avg_total", 0)),
+                        float(event.get("current_frequency_hz", 0.0)),
+                        int(event.get("total_frequencies", 0)),
                     )
                 elif event_type == "iteration":
                     iteration = int(event.get("iteration", 0))
                     data = np.asarray(event.get("data", []), dtype=np.float64)
-                    # Store additional FTIMS metadata in experiment data if available
-                    self.iteration_ready.emit(iteration, data)
+                    
+                    # Extract FTIMS-specific metadata if available
+                    metadata = {
+                        "raw_time_domain_data": event.get("raw_time_domain_data", {}),
+                        "frequency_domain_data": event.get("frequency_domain_data", {}),
+                        "peak_metrics": event.get("peak_metrics", {}),
+                    }
+                    
+                    self.iteration_ready.emit(iteration, data, metadata)
                 elif event_type == "finished":
                     self.finished_ok.emit()
                     return

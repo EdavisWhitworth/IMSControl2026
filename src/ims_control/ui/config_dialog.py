@@ -178,10 +178,19 @@ class ExperimentConfigDialog(QDialog):
             time_per_frequency_ms=self.time_per_frequency_ms.value(),
         ) if mode == OperationMode.FTIMS else FTIMSConfig()
 
+        # For FTIMS mode, set pulse_width_ms to 50% of time_per_frequency_ms for proper duty cycle
+        # For DTIMS mode, use the configured pulse_width_ms
+        if mode == OperationMode.FTIMS:
+            pulse_width = ftims_config.time_per_frequency_ms / 2.0
+            experiment_length = ftims_config.time_per_frequency_ms
+        else:
+            pulse_width = float(self.pulse_width_ms.value())
+            experiment_length = float(self.experiment_length_ms.value())
+
         return ExperimentConfig(
             operation_mode=mode,
-            pulse_width_ms=float(self.pulse_width_ms.value()),
-            experiment_length_ms=float(self.experiment_length_ms.value()),
+            pulse_width_ms=pulse_width,
+            experiment_length_ms=experiment_length,
             data_points=int(self.data_points.value()),
             averages_per_iteration=int(self.averages.value()),
             total_iterations=int(self.iterations.value()),

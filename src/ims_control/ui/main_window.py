@@ -179,6 +179,17 @@ class MainWindow(QMainWindow):
         self.hardware_params_label: QLabel | None = None
         self.btn_save_user_params_defaults: QPushButton | None = None
 
+        # FTIMS-specific attributes
+        self._ftims_raw_time_domain_data: dict[float, np.ndarray] = {}  # freq -> time-domain signal
+        self._ftims_current_frequency_hz: float | None = None
+        self._ftims_current_average_count: int = 0
+        self._ftims_total_averages: int = 0
+        self.ftims_frequency_selector: QComboBox | None = None
+        self.ftims_raw_plot: pg.PlotWidget | None = None
+        self.ftims_raw_curve: Any | None = None
+        self.ftims_raw_cursor_v: pg.InfiniteLine | None = None
+        self.ftims_raw_cursor_h: pg.InfiniteLine | None = None
+
         self._line_peak_region: pg.LinearRegionItem | None = None
         self._line_fwhm_left: pg.InfiniteLine | None = None
         self._line_fwhm_right: pg.InfiniteLine | None = None
@@ -460,9 +471,34 @@ class MainWindow(QMainWindow):
         selected_layout.addWidget(self.line_plot_from_heat)
         self._axis_controls["selected"] = self._create_axis_controls(selected_layout, "selected")
 
+        # FTIMS raw time-domain data tab
+        ftims_raw_tab = QWidget()
+        ftims_raw_layout = QVBoxLayout(ftims_raw_tab)
+        ftims_raw_chooser = QHBoxLayout()
+        ftims_raw_chooser.addWidget(QLabel("Select frequency (Hz):"))
+        self.ftims_frequency_selector = QComboBox()
+        ftims_raw_chooser.addWidget(self.ftims_frequency_selector)
+        ftims_raw_chooser.addStretch()
+        ftims_raw_layout.addLayout(ftims_raw_chooser)
+        
+        self.ftims_raw_plot = pg.PlotWidget(title="FTIMS Raw Time-Domain Data")
+        self.ftims_raw_plot.setLabel("left", "Signal")
+        self.ftims_raw_plot.setLabel("bottom", "Time (ms)")
+        self.ftims_raw_curve = self.ftims_raw_plot.plot(pen=pg.mkPen("g", width=2))
+        self.ftims_raw_cursor_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y", width=1))
+        self.ftims_raw_cursor_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("y", width=1))
+        self.ftims_raw_plot.addItem(self.ftims_raw_cursor_v, ignoreBounds=True)
+        self.ftims_raw_plot.addItem(self.ftims_raw_cursor_h, ignoreBounds=True)
+        ftims_raw_layout.addWidget(self.ftims_raw_plot)
+        self._axis_controls["ftims_raw"] = self._create_axis_controls(ftims_raw_layout, "ftims_raw")
+
         plot_tabs.addTab(line_tab, "Line Plot")
         plot_tabs.addTab(heat_tab, "2D Colormap")
         plot_tabs.addTab(selected_tab, "Selected Iteration")
+        plot_tabs.addTab(ftims_raw_tab, "FTIMS Raw Data")
+        
+        # Hide FTIMS raw tab for DTIMS mode
+        plot_tabs.setTabVisible(3, is_ftims)
 
         root.addWidget(control_box, 0, 0)
         root.addWidget(plot_tabs, 0, 1)
@@ -1714,6 +1750,44 @@ class MainWindow(QMainWindow):
                 self.ko_label.setText("Reduced Mobility (Ko): -- cm²/(V·s)")
                 self._clear_peak_readouts()
 
+    def _update_ftims_frequency_selector(self) -> None:
+        """Populate the FTIMS frequency selector with available frequencies."""
+        if self.ftims_frequency_selector is None:
+            return
+        
+        # Get sorted frequencies
+        frequencies = sorted(self._ftims_raw_time_domain_data.keys())
+        
+        self.ftims_frequency_selector.blockSignals(True)
+        self.ftims_frequency_selector.clear()
+        for freq in frequencies:
+            self.ftims_frequency_selector.addItem(f"{freq:.1f} Hz", freq)
+        self.ftims_frequency_selector.blockSignals(False)
+        
+        # Connect to handle frequency selection changes
+        if self.ftims_frequency_selector.count() > 0:
+            self.ftims_frequency_selector.currentIndexChanged.connect(self._on_ftims_frequency_changed)
+            self.ftims_frequency_selector.setCurrentIndex(0)
+            self._on_ftims_frequency_changed(0)
+
+    def _on_ftims_frequency_changed(self, index: int) -> None:
+        """Update the FTIMS raw plot when frequency selection changes."""
+        if self.ftims_frequency_selector is None or self.ftims_raw_curve is None:
+            return
+        
+        if index < 0 or self.ftims_frequency_selector.count() == 0:
+            self.ftims_raw_curve.setData([], [])
+            return
+        
+        selected_frequency_hz = self.ftims_frequency_selector.itemData(index)
+        if selected_frequency_hz is None or selected_frequency_hz not in self._ftims_raw_time_domain_data:
+            self.ftims_raw_curve.setData([], [])
+            return
+        
+        signal = self._ftims_raw_time_domain_data[selected_frequency_hz]
+        x = np.arange(len(signal), dtype=np.float64)
+        self.ftims_raw_curve.setData(x, signal)
+
     def edit_settings(self) -> None:
         dlg = ExperimentConfigDialog(self.config, self)
         if dlg.exec_():
@@ -1788,13 +1862,45 @@ class MainWindow(QMainWindow):
     def on_status(self, message: str) -> None:
         self.status_label.setText(f"Status: {message}")
 
-    def on_progress(self, iteration: int, total_iterations: int, avg_count: int, avg_total: int) -> None:
-        self.progress_label.setText(
-            f"Iteration: {iteration}/{total_iterations} | Average: {avg_count}/{avg_total}"
-        )
+    def on_progress(self, iteration: int, total_iterations: int, avg_count: int, avg_total: int, current_frequency_hz: float | None = None, total_frequencies: int | None = None) -> None:
+        is_ftims = self.config.operation_mode == OperationMode.FTIMS
+        
+        if is_ftims and current_frequency_hz is not None and total_frequencies is not None:
+            # FTIMS mode: show frequency and average at that frequency
+            self.progress_label.setText(
+                f"Iteration: {iteration}/{total_iterations} | Frequency: {current_frequency_hz:.1f} Hz | Average: {avg_count}/{avg_total}"
+            )
+            self._ftims_current_frequency_hz = current_frequency_hz
+            self._ftims_current_average_count = avg_count
+            self._ftims_total_averages = avg_total
+        else:
+            # DTIMS mode: show standard progress
+            self.progress_label.setText(
+                f"Iteration: {iteration}/{total_iterations} | Average: {avg_count}/{avg_total}"
+            )
 
-    def on_iteration_ready(self, iteration: int, y: np.ndarray) -> None:
+    def on_iteration_ready(self, iteration: int, y: np.ndarray, metadata: dict | None = None) -> None:
         self.experiment_data.add_iteration(y)
+        
+        # Handle FTIMS raw time-domain data if available
+        if metadata is None:
+            metadata = {}
+        
+        if self.config.operation_mode == OperationMode.FTIMS:
+            raw_time_domain = metadata.get("raw_time_domain_data", {})
+            if raw_time_domain:
+                # Convert string keys to floats and numpy arrays
+                for freq_str, signal_list in raw_time_domain.items():
+                    try:
+                        freq = float(freq_str)
+                        self._ftims_raw_time_domain_data[freq] = np.asarray(signal_list, dtype=np.float64)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Update frequency selector if this is the first iteration
+                if iteration == 1:
+                    self._update_ftims_frequency_selector()
+        
         if iteration < 200:
             refresh_every = 5
         elif iteration < 1000:
