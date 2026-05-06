@@ -189,6 +189,7 @@ class MainWindow(QMainWindow):
         self.ftims_raw_curve: Any | None = None
         self.ftims_raw_cursor_v: pg.InfiniteLine | None = None
         self.ftims_raw_cursor_h: pg.InfiniteLine | None = None
+        self.plot_tabs: QTabWidget | None = None
 
         self._line_peak_region: pg.LinearRegionItem | None = None
         self._line_fwhm_left: pg.InfiniteLine | None = None
@@ -497,7 +498,10 @@ class MainWindow(QMainWindow):
         plot_tabs.addTab(selected_tab, "Selected Iteration")
         plot_tabs.addTab(ftims_raw_tab, "FTIMS Raw Data")
         
-        # Hide FTIMS raw tab for DTIMS mode
+        # Store reference to plot tabs for later updates
+        self.plot_tabs = plot_tabs
+        
+        # Show FTIMS raw tab if in FTIMS mode (initially DTIMS, but will be shown when data arrives)
         plot_tabs.setTabVisible(3, is_ftims)
 
         root.addWidget(control_box, 0, 0)
@@ -1900,6 +1904,9 @@ class MainWindow(QMainWindow):
                 # Update frequency selector if this is the first iteration
                 if iteration == 1:
                     self._update_ftims_frequency_selector()
+                    # Make sure the FTIMS raw data tab is visible
+                    if self.plot_tabs is not None:
+                        self.plot_tabs.setTabVisible(3, True)
         
         if iteration < 200:
             refresh_every = 5

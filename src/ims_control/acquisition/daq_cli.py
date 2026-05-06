@@ -155,19 +155,19 @@ def main(argv: list[str] | None = None) -> int:
                             if freq in freq_domain_acc:
                                 freq_domain_acc[freq] += freq_domain_scan[freq]
 
-                    # Emit progress with current frequency index
-                    current_freq_idx = avg_idx
-                    _emit(
-                        {
-                            "type": "progress",
-                            "iteration": iteration,
-                            "total_iterations": total_iterations,
-                            "avg_count": avg_idx,
-                            "avg_total": averages_per_iteration,
-                            "current_frequency_hz": None,  # Will be set per-frequency in future
-                            "total_frequencies": total_frequencies,
-                        }
-                    )
+                    # Emit progress for each frequency that was just scanned in this average
+                    for freq in sorted(freq_domain_scan.keys()):
+                        _emit(
+                            {
+                                "type": "progress",
+                                "iteration": iteration,
+                                "total_iterations": total_iterations,
+                                "avg_count": avg_idx,
+                                "avg_total": averages_per_iteration,
+                                "current_frequency_hz": freq,
+                                "total_frequencies": total_frequencies,
+                            }
+                        )
 
                 if freq_domain_acc is None:
                     continue
