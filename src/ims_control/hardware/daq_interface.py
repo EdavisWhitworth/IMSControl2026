@@ -482,6 +482,20 @@ class NiUSB6351Controller:
         signal = response_amplitude * gate_pulse + noise
         return signal.astype(np.float64)
 
+    def acquire_vsims_voltage_step(self, voltage_kv: float) -> np.ndarray:
+        """Acquire one VSIMS point at the provided stepped drift voltage.
+
+        Hardware path currently reuses DTIMS acquisition and assumes voltage
+        stepping is controlled externally. Simulation path modulates amplitude
+        by voltage to emulate voltage-response behavior.
+        """
+        if not self.available:
+            base = self._simulate_scan()
+            scale = max(0.05, float(voltage_kv) / 10.0)
+            noise = self._rng.normal(0.0, 0.01, size=base.shape[0])
+            return (scale * base + noise).astype(np.float64)
+        return self.acquire_scan()
+
     def write_analog_output(self, channel: str, voltage: float) -> None:
         """Write a single analog-output voltage on the provided AO channel."""
         if not self.available:

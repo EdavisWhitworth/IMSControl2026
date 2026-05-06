@@ -12,6 +12,7 @@ class OperationMode(Enum):
     """Enumeration of IMS operation modes."""
     DTIMS = "DTIMS"  # Drift Time Ion Mobility Spectrometry
     FTIMS = "FTIMS"  # Fourier Transform Ion Mobility Spectrometry
+    STEPPED_VSIMS = "STEPPED_VSIMS"  # Voltage-stepped IMS
 
 
 @dataclass
@@ -68,6 +69,49 @@ class FTIMSConfig:
 
 
 @dataclass
+class SteppedVSIMSConfig:
+    """Configuration for Stepped VSIMS mode."""
+
+    initial_voltage_kv: float = 4.0
+    final_voltage_kv: float = 8.0
+    voltage_step_v: float = 100.0
+    time_add_ms: float = 0.0
+    ionization_bias_kv: float = 0.0
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, object]) -> "SteppedVSIMSConfig":
+        return cls(
+            initial_voltage_kv=float(raw.get("initial_voltage_kv", 4.0)),
+            final_voltage_kv=float(raw.get("final_voltage_kv", 8.0)),
+            voltage_step_v=float(raw.get("voltage_step_v", 100.0)),
+            time_add_ms=float(raw.get("time_add_ms", 0.0)),
+            ionization_bias_kv=float(raw.get("ionization_bias_kv", 0.0)),
+        )
+
+    def voltage_steps_kv(self) -> List[float]:
+        step_kv = float(self.voltage_step_v) / 1000.0
+        if step_kv <= 0.0:
+            return []
+        steps: List[float] = []
+        v = float(self.initial_voltage_kv)
+        stop = float(self.final_voltage_kv)
+        while v <= stop + 1e-9:
+            steps.append(v)
+            v += step_kv
+        return steps
+
+    def total_voltages(self) -> int:
+        return len(self.voltage_steps_kv())
+
+    def estimated_duration_seconds(self, experiment_length_ms: float, averages_per_iteration: int, total_iterations: int) -> float:
+        per_point_s = max(0.0, float(experiment_length_ms)) / 1000.0
+        return float(self.total_voltages()) * max(1, int(averages_per_iteration)) * max(1, int(total_iterations)) * per_point_s
+
+
+@dataclass
 class ExperimentConfig:
     operation_mode: OperationMode = OperationMode.DTIMS
     # DTIMS parameters
@@ -83,6 +127,8 @@ class ExperimentConfig:
     use_simulation: bool = False
     # FTIMS parameters
     ftims_config: Optional[FTIMSConfig] = field(default_factory=FTIMSConfig)
+    # VSIMS parameters
+    vsims_config: Optional[SteppedVSIMSConfig] = field(default_factory=SteppedVSIMSConfig)
 
     def to_dict(self) -> Dict[str, object]:
         config_dict = asdict(self)
@@ -90,6 +136,8 @@ class ExperimentConfig:
         config_dict["operation_mode"] = self.operation_mode.value
         if self.ftims_config:
             config_dict["ftims_config"] = self.ftims_config.to_dict()
+        if self.vsims_config:
+            config_dict["vsims_config"] = self.vsims_config.to_dict()
         return config_dict
 
     @classmethod
@@ -103,6 +151,8 @@ class ExperimentConfig:
 
         ftims_config_dict = raw.get("ftims_config")
         ftims_config = FTIMSConfig.from_dict(ftims_config_dict) if ftims_config_dict else FTIMSConfig()
+        vsims_config_dict = raw.get("vsims_config")
+        vsims_config = SteppedVSIMSConfig.from_dict(vsims_config_dict) if vsims_config_dict else SteppedVSIMSConfig()
 
         return cls(
             operation_mode=operation_mode,
@@ -117,6 +167,7 @@ class ExperimentConfig:
             positive_mode=bool(raw.get("positive_mode", False)),
             use_simulation=bool(raw.get("use_simulation", False)),
             ftims_config=ftims_config,
+            vsims_config=vsims_config,
         )
 
 

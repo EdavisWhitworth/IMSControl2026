@@ -166,8 +166,10 @@ class MainWindow(QMainWindow):
         self.pressure_spinbox: QDoubleSpinBox | None = None
         self.temperature_spinbox: QDoubleSpinBox | None = None
         self.length_spinbox: QDoubleSpinBox | None = None
+        self.voltage_label: QLabel | None = None
         self.voltage_spinbox: QDoubleSpinBox | None = None
         self.gate_v_multiplier_spinbox: QDoubleSpinBox | None = None
+        self.time_add_spinbox: QDoubleSpinBox | None = None
         self.ko_label: QLabel | None = None
         self.noise_start_spinbox: QDoubleSpinBox | None = None
         self.noise_end_spinbox: QDoubleSpinBox | None = None
@@ -183,6 +185,7 @@ class MainWindow(QMainWindow):
 
         # FTIMS-specific attributes
         self._ftims_raw_time_domain_data: dict[float, float] = {}  # freq -> averaged point value
+        self._vsims_voltage_points: dict[float, float] = {}  # voltage_kV -> averaged point value
         self._ftims_current_frequency_hz: float | None = None
         self._ftims_current_average_count: int = 0
         self._ftims_total_averages: int = 0
@@ -191,7 +194,11 @@ class MainWindow(QMainWindow):
         self.ftims_raw_curve: Any | None = None
         self.ftims_raw_cursor_v: pg.InfiniteLine | None = None
         self.ftims_raw_cursor_h: pg.InfiniteLine | None = None
+        self.vsims_optimized_plot: pg.PlotWidget | None = None
+        self.vsims_optimized_curve: Any | None = None
+        self.vsims_topt_curve: Any | None = None
         self.plot_tabs: QTabWidget | None = None
+        self._vsims_iteration_voltages: list[float] = []
 
         self._line_peak_region: pg.LinearRegionItem | None = None
         self._line_fwhm_left: pg.InfiniteLine | None = None
@@ -202,6 +209,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._refresh_config_label()
+        self._apply_mode_ui_state()
         self._update_hv_status_label(ims_v=0.0, ion_v=0.0)
         self._apply_hv_background(False)
 
@@ -327,6 +335,13 @@ class MainWindow(QMainWindow):
         self.gate_v_multiplier_spinbox.setValue(float(self.user_param_defaults["gate_v_multiplier"]))
         self.gate_v_multiplier_spinbox.setSingleStep(0.01)
 
+        self.time_add_spinbox = QDoubleSpinBox()
+        self.time_add_spinbox.setDecimals(3)
+        self.time_add_spinbox.setRange(0.0, 10000.0)
+        self.time_add_spinbox.setValue(float(self.user_param_defaults["time_add_ms"]))
+        self.time_add_spinbox.setSingleStep(0.1)
+        self.time_add_spinbox.setSuffix(" ms")
+
         self.noise_start_spinbox = QDoubleSpinBox()
         self.noise_start_spinbox.setDecimals(3)
         self.noise_start_spinbox.setRange(0.0, 1e6)
@@ -345,16 +360,19 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(self.temperature_spinbox, 1, 1)
         params_layout.addWidget(QLabel("Length"), 2, 0)
         params_layout.addWidget(self.length_spinbox, 2, 1)
-        params_layout.addWidget(QLabel("Voltage"), 3, 0)
+        self.voltage_label = QLabel("Voltage")
+        params_layout.addWidget(self.voltage_label, 3, 0)
         params_layout.addWidget(self.voltage_spinbox, 3, 1)
         params_layout.addWidget(QLabel("Gate V Multiplier"), 4, 0)
         params_layout.addWidget(self.gate_v_multiplier_spinbox, 4, 1)
-        params_layout.addWidget(QLabel("Noise Start"), 5, 0)
-        params_layout.addWidget(self.noise_start_spinbox, 5, 1)
-        params_layout.addWidget(QLabel("Noise End"), 6, 0)
-        params_layout.addWidget(self.noise_end_spinbox, 6, 1)
+        params_layout.addWidget(QLabel("time_add"), 5, 0)
+        params_layout.addWidget(self.time_add_spinbox, 5, 1)
+        params_layout.addWidget(QLabel("Noise Start"), 6, 0)
+        params_layout.addWidget(self.noise_start_spinbox, 6, 1)
+        params_layout.addWidget(QLabel("Noise End"), 7, 0)
+        params_layout.addWidget(self.noise_end_spinbox, 7, 1)
         self.btn_save_user_params_defaults = QPushButton("Save User Parameters as Default")
-        params_layout.addWidget(self.btn_save_user_params_defaults, 7, 0, 1, 2)
+        params_layout.addWidget(self.btn_save_user_params_defaults, 8, 0, 1, 2)
         
         control_layout.addWidget(params_box)
 
@@ -399,7 +417,8 @@ class MainWindow(QMainWindow):
 
         # Line plot title and labels depend on mode
         is_ftims = self.config.operation_mode == OperationMode.FTIMS
-        plot_title = "FTIMS Mobility-Domain Spectrum" if is_ftims else "IMS Signal"
+        is_vsims = self.config.operation_mode == OperationMode.STEPPED_VSIMS
+        plot_title = "FTIMS Mobility-Domain Spectrum" if is_ftims else ("VSIMS Trace" if is_vsims else "IMS Signal")
         y_label = "Intensity" if is_ftims else "Signal"
         x_label = "Drift time (ms)" if is_ftims else "Time (ms)"
         
@@ -429,13 +448,15 @@ class MainWindow(QMainWindow):
         heat_tab = QWidget()
         heat_layout = QVBoxLayout(heat_tab)
         self.heat_view = pg.GraphicsLayoutWidget()
-        heat_title = "Frequency Heatmap (FTIMS)" if is_ftims else "Iterations Heatmap (DTIMS)"
+        heat_title = "Frequency Heatmap (FTIMS)" if is_ftims else ("Voltage Heatmap (VSIMS)" if is_vsims else "Iterations Heatmap (DTIMS)")
         heat_y_label = "Frequency (Hz)" if is_ftims else "Time (ms)"
         self.heat_plot = self.heat_view.addPlot(title=heat_title)
         self.heat_plot.setLabel("left", heat_y_label)
-        self.heat_plot.setLabel("bottom", "Iteration")
+        self.heat_plot.setLabel("bottom", "Voltage (kV)" if is_vsims else "Iteration")
         self.heat_img = pg.ImageItem()
         self.heat_plot.addItem(self.heat_img)
+        self.vsims_topt_curve = self.heat_plot.plot(pen=pg.mkPen("y", width=3, style=Qt.DashLine))
+        self.vsims_topt_curve.setZValue(20)
         self.heat_cursor_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("c", width=1))
         self.heat_cursor_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("c", width=1))
         self.heat_plot.addItem(self.heat_cursor_v, ignoreBounds=True)
@@ -449,7 +470,7 @@ class MainWindow(QMainWindow):
 
         selected_tab = QWidget()
         selected_layout = QVBoxLayout(selected_tab)
-        selected_title = "Selected Frequency Spectrum (FTIMS)" if is_ftims else "IMS Signal (Selected from Heatmap)"
+        selected_title = "Selected Frequency Spectrum (FTIMS)" if is_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else "IMS Signal (Selected from Heatmap)")
         selected_x_label = "Drift time (ms)" if is_ftims else "Time (ms)"
         self.line_plot_from_heat = pg.PlotWidget(title=selected_title)
         self.line_plot_from_heat.setLabel("left", y_label)
@@ -499,12 +520,28 @@ class MainWindow(QMainWindow):
         plot_tabs.addTab(heat_tab, "2D Colormap")
         plot_tabs.addTab(selected_tab, "Selected Iteration")
         plot_tabs.addTab(ftims_raw_tab, "FTIMS Raw Data")
+
+        vsims_opt_tab = QWidget()
+        vsims_opt_layout = QVBoxLayout(vsims_opt_tab)
+        self.vsims_optimized_plot = pg.PlotWidget(title="VSIMS Optimized Spectrum")
+        self.vsims_optimized_plot.setLabel("left", "Signal")
+        self.vsims_optimized_plot.setLabel("bottom", "Optimized Drift Time (ms)")
+        self.vsims_optimized_curve = self.vsims_optimized_plot.plot(
+            pen=pg.mkPen("m", width=2),
+            symbol="o",
+            symbolSize=6,
+            symbolBrush=pg.mkBrush("m"),
+        )
+        vsims_opt_layout.addWidget(self.vsims_optimized_plot)
+        self._axis_controls["vsims_opt"] = self._create_axis_controls(vsims_opt_layout, "vsims_opt")
+        plot_tabs.addTab(vsims_opt_tab, "VSIMS Optimized")
         
         # Store reference to plot tabs for later updates
         self.plot_tabs = plot_tabs
         
-        # Show FTIMS raw tab if in FTIMS mode (initially DTIMS, but will be shown when data arrives)
+        # Mode-specific tabs are controlled here and refreshed on mode changes.
         plot_tabs.setTabVisible(3, is_ftims)
+        plot_tabs.setTabVisible(4, is_vsims)
 
         root.addWidget(control_box, 0, 0)
         root.addWidget(plot_tabs, 0, 1)
@@ -525,6 +562,7 @@ class MainWindow(QMainWindow):
         self.length_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.voltage_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.gate_v_multiplier_spinbox.valueChanged.connect(self._on_parameter_changed)
+        self.time_add_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.noise_start_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.noise_end_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.btn_save_user_params_defaults.clicked.connect(self.save_user_parameters_as_default)
@@ -553,6 +591,7 @@ class MainWindow(QMainWindow):
         self._on_auto_axis_toggled("heat")
         self._on_auto_axis_toggled("selected")
         self._on_auto_axis_toggled("ftims_raw")
+        self._on_auto_axis_toggled("vsims_opt")
 
         self._refresh_iteration_selector()
 
@@ -560,14 +599,32 @@ class MainWindow(QMainWindow):
         """Apply FTIMS/DTIMS visibility and labels after mode changes."""
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_ftims = str(mode_value).upper() == "FTIMS"
-        if self.plot_tabs is not None and self.plot_tabs.count() > 3:
+        is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
+        if self.plot_tabs is not None and self.plot_tabs.count() > 4:
             self.plot_tabs.setTabVisible(3, is_ftims)
+            self.plot_tabs.setTabVisible(4, is_vsims)
+        if self.heat_plot is not None:
+            self.heat_plot.setLabel("bottom", "Voltage (kV)" if is_vsims else "Iteration")
+            self.heat_plot.setTitle("Frequency Heatmap (FTIMS)" if is_ftims else ("Voltage Heatmap (VSIMS)" if is_vsims else "Iterations Heatmap (DTIMS)"))
+        if self.line_plot is not None:
+            self.line_plot.setTitle("FTIMS Mobility-Domain Spectrum" if is_ftims else ("VSIMS Trace" if is_vsims else "IMS Signal"))
+        if self.line_plot_from_heat is not None:
+            self.line_plot_from_heat.setTitle("Selected Frequency Spectrum (FTIMS)" if is_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else "IMS Signal (Selected from Heatmap)"))
+        if self.voltage_spinbox is not None:
+            self.voltage_spinbox.setVisible(not is_vsims)
+        if self.voltage_label is not None:
+            self.voltage_label.setVisible(not is_vsims)
+        if self.btn_hv_settings is not None:
+            self.btn_hv_settings.setVisible(not is_vsims)
+        self._update_vsims_heat_overlay()
 
     def _refresh_hv_control_states(self) -> None:
         hv_busy = self.hv_worker is not None and self.hv_worker.isRunning()
         acquisition_active = self.worker is not None and self.worker.isRunning()
+        mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
+        is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
         self.btn_hv_enable.setEnabled(not hv_busy)
-        self.btn_hv_settings.setEnabled(not hv_busy)
+        self.btn_hv_settings.setEnabled((not hv_busy) and (not is_vsims))
         self.btn_hv_update.setEnabled(self.hv_enabled and (not hv_busy) and (not acquisition_active))
 
     def _create_axis_controls(self, parent_layout: QVBoxLayout, key: str) -> dict[str, object]:
@@ -690,7 +747,15 @@ class MainWindow(QMainWindow):
 
         if self._heat_row_count == 0:
             return None
-        x_min, x_max = self._safe_bounds(1.0, float(self._heat_row_count))
+        mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
+        is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
+        if is_vsims and self.config.vsims_config is not None:
+            x_min, x_max = self._safe_bounds(
+                float(self.config.vsims_config.initial_voltage_kv),
+                float(self.config.vsims_config.final_voltage_kv),
+            )
+        else:
+            x_min, x_max = self._safe_bounds(1.0, float(self._heat_row_count))
         y_min, y_max = self._safe_bounds(0.0, float(self.config.experiment_length_ms))
         return x_min, x_max, y_min, y_max
 
@@ -861,7 +926,8 @@ class MainWindow(QMainWindow):
         pressure = self.pressure_spinbox.value()  # Torr
         temperature = self.temperature_spinbox.value()  # °C
         length = self.length_spinbox.value()  # cm
-        voltage = self.voltage_spinbox.value() * 1000.0  # Convert from kV to V
+        voltage_kv = self._ko_voltage_kv_for_active_trace()
+        voltage = voltage_kv * 1000.0  # Convert from kV to V
         gate_v_multiplier = self.gate_v_multiplier_spinbox.value()
         
         # Convert drift time from ms to seconds
@@ -901,6 +967,8 @@ class MainWindow(QMainWindow):
     def _on_parameter_changed(self, _value: float | None = None) -> None:
         self._update_baseline_overlay("line")
         self._update_baseline_overlay("selected")
+        self._update_vsims_optimized_plot()
+        self._update_vsims_heat_overlay()
         if self._active_cursor_locked():
             self._update_ko()
             if self._line_cursor_locked:
@@ -912,6 +980,79 @@ class MainWindow(QMainWindow):
                     self._current_cursor_x,
                     "selected",
                 )
+
+    def _active_iteration_index_for_ko(self) -> int | None:
+        count = self.experiment_data.iteration_count()
+        if count == 0:
+            return None
+        if (self._selected_cursor_locked or self._heat_cursor_locked) and self._selected_heat_iteration_index is not None:
+            return int(np.clip(self._selected_heat_iteration_index, 0, count - 1))
+        if self.follow_latest_checkbox.isChecked():
+            return count - 1
+        return int(np.clip(self.iteration_selector.currentIndex(), 0, count - 1))
+
+    def _ko_voltage_kv_for_active_trace(self) -> float:
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS:
+            idx = self._active_iteration_index_for_ko()
+            if idx is not None and idx < len(self._vsims_iteration_voltages):
+                return float(self._vsims_iteration_voltages[idx])
+            if self.config.vsims_config is not None:
+                return float(self.config.vsims_config.initial_voltage_kv)
+        return float(self.voltage_spinbox.value())
+
+    def _vsims_topt_ms(self, voltage_kv: float) -> float:
+        temperature_k = float(self.temperature_spinbox.value()) + 273.15 if self.temperature_spinbox is not None else 293.15
+        gate_mult = float(self.gate_v_multiplier_spinbox.value()) if self.gate_v_multiplier_spinbox is not None else 1.0
+        pulse_s = max(1e-9, float(self.config.pulse_width_ms) / 1000.0)
+        time_add_s = float(self.time_add_spinbox.value()) / 1000.0 if self.time_add_spinbox is not None else 0.0
+        voltage_v = max(1e-9, float(voltage_kv) * 1000.0 * gate_mult)
+        core = (pulse_s / (0.0395 * max(1e-9, temperature_k))) * np.sqrt((temperature_k * voltage_v) / 0.0395)
+        topt_s = (273.15 / 760.0) * core + time_add_s
+        return float(topt_s * 1000.0)
+
+    def _update_vsims_heat_overlay(self) -> None:
+        if self.vsims_topt_curve is None:
+            return
+        if self.config.operation_mode != OperationMode.STEPPED_VSIMS or self.config.vsims_config is None:
+            self.vsims_topt_curve.setData([], [])
+            return
+        voltages = np.asarray(self.config.vsims_config.voltage_steps_kv(), dtype=np.float64)
+        if voltages.size == 0:
+            self.vsims_topt_curve.setData([], [])
+            return
+        max_time_ms = max(1e-9, float(self.config.experiment_length_ms))
+        topt = np.asarray([self._vsims_topt_ms(float(v)) for v in voltages], dtype=np.float64)
+        topt = np.clip(topt, 0.0, max_time_ms)
+        self.vsims_topt_curve.setData(voltages, topt)
+
+    def _calculate_vsims_start_hv_outputs(self) -> tuple[float, float, float]:
+        if self.config.vsims_config is None:
+            raise ValueError("Missing VSIMS configuration.")
+        max_kv = float(self.hv_config.ims_max_output_kv)
+        ctrl_max_v = float(self.hv_config.control_voltage_max_v)
+        ims_kv = float(self.config.vsims_config.initial_voltage_kv)
+        ion_total_kv = float(ims_kv + self.config.vsims_config.ionization_bias_kv)
+
+        if max_kv <= 0.0:
+            raise ValueError("IMS max output must be greater than 0 kV.")
+        if ctrl_max_v <= 0.0:
+            raise ValueError("Control voltage max must be greater than 0 V.")
+        if ims_kv < 0.0:
+            raise ValueError("VSIMS initial voltage cannot be negative.")
+        if ion_total_kv < 0.0:
+            raise ValueError("VSIMS ionization total voltage cannot be negative.")
+        if ims_kv > max_kv:
+            raise ValueError(
+                f"VSIMS initial voltage ({ims_kv:.3f} kV) exceeds IMS max output ({max_kv:.3f} kV)."
+            )
+        if ion_total_kv > max_kv:
+            raise ValueError(
+                f"VSIMS ionization total ({ion_total_kv:.3f} kV) exceeds IMS max output ({max_kv:.3f} kV)."
+            )
+
+        ims_v = (ims_kv / max_kv) * ctrl_max_v
+        ion_v = (ion_total_kv / max_kv) * ctrl_max_v
+        return ims_v, ion_v, ion_total_kv
 
     def _baseline_bounds(self, source: str) -> tuple[float, float]:
         del source
@@ -1037,6 +1178,16 @@ class MainWindow(QMainWindow):
                 f"Step: {ftims_cfg.frequency_step_hz} Hz\n"
                 f"End freq: {ftims_cfg.end_frequency_hz} Hz\n"
                 f"Step time: {ftims_cfg.step_duration_seconds(cfg.averages_per_iteration):.3f} s\n"
+                f"Averages: {cfg.averages_per_iteration}\n"
+                f"Iterations: {cfg.total_iterations}"
+            )
+        elif cfg.operation_mode == OperationMode.STEPPED_VSIMS and cfg.vsims_config is not None:
+            vs_cfg = cfg.vsims_config
+            text = (
+                f"Initial voltage: {vs_cfg.initial_voltage_kv:.3f} kV\n"
+                f"Final voltage: {vs_cfg.final_voltage_kv:.3f} kV\n"
+                f"Voltage step: {vs_cfg.voltage_step_v:.1f} V\n"
+                f"Ionization bias: {vs_cfg.ionization_bias_kv:.3f} kV\n"
                 f"Averages: {cfg.averages_per_iteration}\n"
                 f"Iterations: {cfg.total_iterations}"
             )
@@ -1213,7 +1364,7 @@ class MainWindow(QMainWindow):
         self._apply_hv_background(self.hv_enabled)
         self._update_hv_status_label(ims_v=ims_v, ion_v=ion_v)
 
-    def _start_hv_apply(self, enabled: bool) -> None:
+    def _start_hv_apply(self, enabled: bool, ims_v_override: float | None = None, ion_v_override: float | None = None) -> None:
         if self.hv_worker is not None and self.hv_worker.isRunning():
             self.status_label.setText("Status: HV update already in progress")
             self.btn_hv_enable.blockSignals(True)
@@ -1225,7 +1376,11 @@ class MainWindow(QMainWindow):
         ims_v = 0.0
         ion_v = 0.0
         if enabled:
-            ims_v, ion_v, _ion_total_kv = self._calculate_hv_outputs()
+            if ims_v_override is not None and ion_v_override is not None:
+                ims_v = float(ims_v_override)
+                ion_v = float(ion_v_override)
+            else:
+                ims_v, ion_v, _ion_total_kv = self._calculate_hv_outputs()
 
         self._pending_hv_enabled = bool(enabled)
         self._pending_hv_ims_v = float(ims_v)
@@ -1252,12 +1407,21 @@ class MainWindow(QMainWindow):
         self._update_hv_status_label(ims_v=ims_v, ion_v=ion_v)
 
         if self.hv_enabled:
-            _ims_v, _ion_v, ion_total_kv = self._calculate_hv_outputs()
-            self.status_label.setText(
-                "Status: HV enabled "
-                f"(IMS={self.hv_config.ims_setpoint_kv:.3f} kV -> {ims_v:.3f} V, "
-                f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
-            )
+            if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
+                ims_kv = float(self.config.vsims_config.initial_voltage_kv)
+                ion_total_kv = float(ims_kv + self.config.vsims_config.ionization_bias_kv)
+                self.status_label.setText(
+                    "Status: HV enabled "
+                    f"(VSIMS start IMS={ims_kv:.3f} kV -> {ims_v:.3f} V, "
+                    f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
+                )
+            else:
+                _ims_v, _ion_v, ion_total_kv = self._calculate_hv_outputs()
+                self.status_label.setText(
+                    "Status: HV enabled "
+                    f"(IMS={self.hv_config.ims_setpoint_kv:.3f} kV -> {ims_v:.3f} V, "
+                    f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
+                )
         else:
             self.status_label.setText("Status: HV disabled")
         self._refresh_hv_control_states()
@@ -1286,7 +1450,11 @@ class MainWindow(QMainWindow):
             return
         try:
             self.status_label.setText("Status: Applying updated HV values...")
-            self._start_hv_apply(enabled=True)
+            if self.config.operation_mode == OperationMode.STEPPED_VSIMS:
+                ims_v, ion_v, _ion_total_kv = self._calculate_vsims_start_hv_outputs()
+                self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
+            else:
+                self._start_hv_apply(enabled=True)
         except Exception as exc:
             QMessageBox.critical(self, "HV output error", str(exc))
             self._refresh_hv_control_states()
@@ -1319,12 +1487,17 @@ class MainWindow(QMainWindow):
         z_value: float | None = None,
         locked: bool = False,
     ) -> None:
+        mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
+        is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
         if x_iter is None or y_ms is None:
-            self.heat_cursor_label.setText("Heat cursor: x=-- (iter), y=-- ms")
+            self.heat_cursor_label.setText("Heat cursor: x=-- (kV), y=-- ms" if is_vsims else "Heat cursor: x=-- (iter), y=-- ms")
             return
 
         lock_suffix = " [LOCKED]" if locked else ""
-        base_line = f"Heat cursor: x={x_iter:.3f} (iter), y={y_ms:.4f} ms{lock_suffix}"
+        if is_vsims:
+            base_line = f"Heat cursor: x={x_iter:.4f} (kV), y={y_ms:.4f} ms{lock_suffix}"
+        else:
+            base_line = f"Heat cursor: x={x_iter:.3f} (iter), y={y_ms:.4f} ms{lock_suffix}"
         if z_value is None:
             self.heat_cursor_label.setText(base_line)
             return
@@ -1345,6 +1518,7 @@ class MainWindow(QMainWindow):
             "length_cm": 10.0,
             "voltage_kv": 4.0,
             "gate_v_multiplier": 0.5,
+            "time_add_ms": 0.0,
             "noise_start_ms": noise_start_default,
             "noise_end_ms": noise_end_default,
         }
@@ -1382,6 +1556,7 @@ class MainWindow(QMainWindow):
             "length_cm": float(self.length_spinbox.value()),
             "voltage_kv": float(self.voltage_spinbox.value()),
             "gate_v_multiplier": float(self.gate_v_multiplier_spinbox.value()),
+            "time_add_ms": float(self.time_add_spinbox.value()),
             "noise_start_ms": float(self.noise_start_spinbox.value()),
             "noise_end_ms": float(self.noise_end_spinbox.value()),
         }
@@ -1525,9 +1700,19 @@ class MainWindow(QMainWindow):
         self.line_curve_from_heat.setData(x, y)
         self._update_baseline_overlay("selected")
         self._update_auto_axis("selected")
-        self.line_plot_from_heat.setTitle(
-            f"IMS Signal (Selected from Heatmap) - Iteration {bounded_index + 1}"
-        )
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
+            if bounded_index < len(self._vsims_iteration_voltages):
+                self.line_plot_from_heat.setTitle(
+                    f"VSIMS Signal (Selected Voltage) - {self._vsims_iteration_voltages[bounded_index]:.4f} kV"
+                )
+            else:
+                self.line_plot_from_heat.setTitle(
+                    f"VSIMS Signal (Selected Voltage) - Index {bounded_index + 1}"
+                )
+        else:
+            self.line_plot_from_heat.setTitle(
+                f"IMS Signal (Selected from Heatmap) - Iteration {bounded_index + 1}"
+            )
 
     def _queue_selected_line_plot_update(self, iteration_index: int) -> None:
         self._pending_selected_iteration_index = int(iteration_index)
@@ -1551,6 +1736,7 @@ class MainWindow(QMainWindow):
         if matrix.size == 0:
             self.heat_img.setImage(np.zeros((1, 1)))
             self.heat_img.setRect(QRectF(0.0, 0.0, 1.0, 1.0))
+            self._update_vsims_heat_overlay()
             self._heat_levels_initialized = False
             self._heat_cursor_locked = False
             self._selected_heat_iteration_index = None
@@ -1573,7 +1759,14 @@ class MainWindow(QMainWindow):
         else:
             max_time_ms = float(self.config.experiment_length_ms)
         row_count = matrix.shape[0]
-        self.heat_img.setRect(QRectF(1.0, 0.0, float(row_count), max_time_ms))
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
+            x_start = float(self.config.vsims_config.initial_voltage_kv)
+            x_end = float(self.config.vsims_config.final_voltage_kv)
+            x_width = max(1e-9, x_end - x_start)
+            self.heat_img.setRect(QRectF(x_start, 0.0, x_width, max_time_ms))
+        else:
+            self.heat_img.setRect(QRectF(1.0, 0.0, float(row_count), max_time_ms))
+        self._update_vsims_heat_overlay()
         self._update_auto_axis("heat")
         if self._axis_controls["heat"]["auto_z"].isChecked():
             self._autoscale_heat_z()
@@ -1659,13 +1852,20 @@ class MainWindow(QMainWindow):
 
         mouse_point = self.heat_plot.vb.mapSceneToView(pos)
         max_time_ms = float(self.config.experiment_length_ms)
-        x_val = float(np.clip(mouse_point.x(), 1.0, float(row_count)))
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
+            x_min = float(self.config.vsims_config.initial_voltage_kv)
+            x_max = float(self.config.vsims_config.final_voltage_kv)
+            x_val = float(np.clip(mouse_point.x(), x_min, x_max))
+            denom = max(1e-9, x_max - x_min)
+            iter_idx = int(np.clip(round(((x_val - x_min) / denom) * (row_count - 1)), 0, row_count - 1))
+        else:
+            x_val = float(np.clip(mouse_point.x(), 1.0, float(row_count)))
+            iter_idx = int(np.clip(round(x_val - 1.0), 0, row_count - 1))
         y_val = float(np.clip(mouse_point.y(), 0.0, max_time_ms))
 
         self.heat_cursor_v.setPos(x_val)
         self.heat_cursor_h.setPos(y_val)
 
-        iter_idx = int(np.clip(round(x_val - 1.0), 0, row_count - 1))
         point_idx = int(round((y_val / max_time_ms) * (self.config.data_points - 1))) if max_time_ms > 0 else 0
         point_idx = int(np.clip(point_idx, 0, self.config.data_points - 1))
         z_val = float(matrix[iter_idx, point_idx])
@@ -1689,12 +1889,19 @@ class MainWindow(QMainWindow):
 
         self._heat_cursor_locked = not self._heat_cursor_locked
         mouse_point = self.heat_plot.vb.mapSceneToView(mouse_event.scenePos())
-        selected_iter_idx = int(np.clip(round(float(mouse_point.x()) - 1.0), 0, self._heat_row_count - 1))
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
+            x_min = float(self.config.vsims_config.initial_voltage_kv)
+            x_max = float(self.config.vsims_config.final_voltage_kv)
+            x_val = float(np.clip(mouse_point.x(), x_min, x_max))
+            denom = max(1e-9, x_max - x_min)
+            selected_iter_idx = int(np.clip(round(((x_val - x_min) / denom) * (self._heat_row_count - 1)), 0, self._heat_row_count - 1))
+        else:
+            selected_iter_idx = int(np.clip(round(float(mouse_point.x()) - 1.0), 0, self._heat_row_count - 1))
+            x_val = float(np.clip(mouse_point.x(), 1.0, float(self._heat_row_count)))
 
         max_time_ms = float(self.config.experiment_length_ms)
-        x_val = float(np.clip(mouse_point.x(), 1.0, float(self._heat_row_count)))
         y_val = float(np.clip(mouse_point.y(), 0.0, max_time_ms))
-        iter_idx = int(np.clip(round(x_val - 1.0), 0, self._heat_row_count - 1))
+        iter_idx = selected_iter_idx
         point_idx = int(round((y_val / max_time_ms) * (self.config.data_points - 1))) if max_time_ms > 0 else 0
         point_idx = int(np.clip(point_idx, 0, self.config.data_points - 1))
         z_val = float(self._heat_matrix[iter_idx, point_idx])
@@ -1788,6 +1995,7 @@ class MainWindow(QMainWindow):
                 self._save_default_config(self.config)
             self.experiment_data.reset(self.config)
             self._selected_heat_iteration_index = None
+            self._vsims_iteration_voltages.clear()
             self._refresh_config_label()
             self._apply_mode_ui_state()
             self._refresh_iteration_selector()
@@ -1809,7 +2017,11 @@ class MainWindow(QMainWindow):
 
     def on_hv_toggled(self, checked: bool) -> None:
         try:
-            self._start_hv_apply(enabled=bool(checked))
+            if bool(checked) and self.config.operation_mode == OperationMode.STEPPED_VSIMS:
+                ims_v, ion_v, _ion_total_kv = self._calculate_vsims_start_hv_outputs()
+                self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
+            else:
+                self._start_hv_apply(enabled=bool(checked))
         except Exception as exc:
             QMessageBox.critical(self, "HV output error", str(exc))
             self.hv_enabled = False
@@ -1825,6 +2037,14 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "Already running", "Acquisition is already running.")
             return
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS and not self.hv_enabled:
+            QMessageBox.warning(
+                self,
+                "HV required",
+                "Stepped VSIMS requires HV ON before starting acquisition.\n"
+                "Please turn on HV first.",
+            )
+            return
 
         self.experiment_data.reset(self.config)
         self._selected_heat_iteration_index = None
@@ -1832,16 +2052,21 @@ class MainWindow(QMainWindow):
         self._heat_z_min = None
         self._heat_z_max = None
         self._ftims_raw_time_domain_data.clear()
+        self._vsims_voltage_points.clear()
+        self._vsims_iteration_voltages.clear()
         if self.ftims_raw_curve is not None:
             self.ftims_raw_curve.setData([], [])
+        if self.vsims_optimized_curve is not None:
+            self.vsims_optimized_curve.setData([], [])
         self._apply_mode_ui_state()
         self._refresh_iteration_selector()
         self.update_heatmap(force_levels=True)
 
-        self.worker = AcquisitionWorker(self.config)
+        self.worker = AcquisitionWorker(self.config, self._current_user_params())
         self.worker.status.connect(self.on_status)
         self.worker.progress.connect(self.on_progress)
         self.worker.ftims_raw_step.connect(self.on_ftims_raw_step)
+        self.worker.vsims_sweep_complete.connect(self.on_vsims_sweep_complete)
         self.worker.iteration_ready.connect(self.on_iteration_ready)
         self.worker.finished_ok.connect(self.on_finished)
         self.worker.failed.connect(self.on_failed)
@@ -1867,10 +2092,15 @@ class MainWindow(QMainWindow):
         )
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_ftims = str(mode_value).upper() == "FTIMS"
+        is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
         has_frequency_info = current_frequency_hz is not None and float(current_frequency_hz) > 0.0
         has_frequency_count = total_frequencies is not None and int(total_frequencies) > 1
         
-        if is_ftims or has_frequency_info or has_frequency_count:
+        if is_vsims and current_frequency_hz is not None:
+            self.progress_label.setText(
+                f"Point: {iteration}/{total_iterations} | Voltage: {float(current_frequency_hz):.3f} kV | Average: {avg_count}/{avg_total}"
+            )
+        elif is_ftims or has_frequency_info or has_frequency_count:
             # FTIMS mode: show frequency and average at that frequency
             self.progress_label.setText(
                 f"Iteration: {iteration}/{total_iterations} | Frequency: {float(current_frequency_hz or 0.0):.1f} Hz | Average: {avg_count}/{avg_total}"
@@ -1915,6 +2145,7 @@ class MainWindow(QMainWindow):
         
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_ftims = str(mode_value).upper() == "FTIMS"
+        is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
         if is_ftims:
             raw_points = metadata.get("raw_spectrum_points", {})
             if raw_points:
@@ -1927,22 +2158,22 @@ class MainWindow(QMainWindow):
                 if self.plot_tabs is not None:
                     self.plot_tabs.setTabVisible(3, True)
 
-            raw_time_domain = metadata.get("raw_time_domain_data", {})
-            if not raw_time_domain:
-                # Fallback: if raw data is absent, use frequency-domain payload
-                # so FTIMS step traces still populate in the UI.
-                raw_time_domain = metadata.get("frequency_domain_data", {})
-            if raw_time_domain:
-                # Convert string keys to floats and numpy arrays
-                for freq_str, signal_list in raw_time_domain.items():
-                    try:
-                        freq = float(freq_str)
-                        self._ftims_raw_time_domain_data[freq] = float(np.mean(np.asarray(signal_list, dtype=np.float64)))
-                    except (ValueError, TypeError):
-                        pass
-                self._update_ftims_raw_spectrum_plot()
-                if self.plot_tabs is not None:
-                    self.plot_tabs.setTabVisible(3, True)
+        if is_vsims:
+            vs_voltage = metadata.get("vsims_voltage_kv")
+            vs_point = metadata.get("vsims_raw_point")
+            if vs_voltage is not None:
+                try:
+                    self._vsims_iteration_voltages.append(float(vs_voltage))
+                except (TypeError, ValueError):
+                    pass
+            if vs_voltage is not None and vs_point is not None:
+                try:
+                    self._vsims_voltage_points[float(vs_voltage)] = float(vs_point)
+                    self._update_vsims_optimized_plot()
+                    if self.plot_tabs is not None:
+                        self.plot_tabs.setTabVisible(4, True)
+                except Exception:
+                    pass
         
         if iteration < 200:
             refresh_every = 5
@@ -1980,6 +2211,21 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText(f"Status: Iteration {iteration} complete")
 
+    def on_vsims_sweep_complete(self, payload: dict) -> None:
+        raw_points = payload.get("raw_spectrum_points", {}) if isinstance(payload, dict) else {}
+        if not isinstance(raw_points, dict):
+            return
+
+        for voltage_str, point_val in raw_points.items():
+            try:
+                self._vsims_voltage_points[float(voltage_str)] = float(point_val)
+            except (TypeError, ValueError):
+                pass
+
+        self._update_vsims_optimized_plot()
+        if self.plot_tabs is not None:
+            self.plot_tabs.setTabVisible(4, True)
+
     def _ftims_ui_debug(self, message: str) -> None:
         """Append lightweight UI telemetry for FTIMS signal-handling diagnostics."""
         try:
@@ -1989,6 +2235,21 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _update_vsims_optimized_plot(self) -> None:
+        if self.vsims_optimized_curve is None or not self._vsims_voltage_points:
+            return
+
+        x_vals: list[float] = []
+        y_vals: list[float] = []
+        for voltage_kv in sorted(self._vsims_voltage_points.keys()):
+            x_vals.append(self._vsims_topt_ms(float(voltage_kv)))
+            y_vals.append(float(self._vsims_voltage_points[voltage_kv]))
+
+        order = np.argsort(np.asarray(x_vals, dtype=np.float64))
+        x = np.asarray(x_vals, dtype=np.float64)[order]
+        y = np.asarray(y_vals, dtype=np.float64)[order]
+        self.vsims_optimized_curve.setData(x, y)
+
     def on_finished(self) -> None:
         self._append_iteration_selector(self.experiment_data.iteration_count(), refresh_plot=False)
         self.update_line_plot()
@@ -1996,6 +2257,12 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_edit.setEnabled(True)
+        if self.hv_enabled and self.config.operation_mode == OperationMode.STEPPED_VSIMS:
+            try:
+                ims_v, ion_v, _ion_total_kv = self._calculate_vsims_start_hv_outputs()
+                self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
+            except Exception as exc:
+                QMessageBox.critical(self, "HV output error", str(exc))
         self._refresh_hv_control_states()
 
     def on_failed(self, message: str) -> None:
@@ -2030,6 +2297,12 @@ class MainWindow(QMainWindow):
         self.config = loaded.config
         self.experiment_data = loaded
         self._selected_heat_iteration_index = None
+        self._vsims_iteration_voltages.clear()
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
+            steps = self.config.vsims_config.voltage_steps_kv()
+            if steps:
+                total_rows = self.experiment_data.iteration_count()
+                self._vsims_iteration_voltages = [float(steps[i % len(steps)]) for i in range(total_rows)]
         self._time_axis_cache = np.array([], dtype=np.float64)
         loaded_matrix = self.experiment_data.all_iterations_matrix()
         if loaded_matrix.size > 0:
@@ -2039,6 +2312,7 @@ class MainWindow(QMainWindow):
             self._heat_z_min = None
             self._heat_z_max = None
         self._refresh_config_label()
+        self._apply_mode_ui_state()
         self._refresh_iteration_selector()
         self.update_heatmap(force_levels=True)
         if self.hv_enabled:

@@ -17,13 +17,15 @@ class AcquisitionWorker(QThread):
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, int, int, float, int)  # iteration, total_iterations, avg_count, avg_total, current_frequency_hz (or 0), total_frequencies
     ftims_raw_step = pyqtSignal(float, object)  # frequency_hz, np.ndarray signal
+    vsims_sweep_complete = pyqtSignal(dict)  # sweep metadata
     iteration_ready = pyqtSignal(int, object, dict)  # iteration index (1-based), np.ndarray, metadata dict
     finished_ok = pyqtSignal()
     failed = pyqtSignal(str)
 
-    def __init__(self, config: ExperimentConfig) -> None:
+    def __init__(self, config: ExperimentConfig, user_params: dict | None = None) -> None:
         super().__init__()
         self.config = config
+        self.user_params = user_params or {}
         self._stop_requested = False
         self._proc: subprocess.Popen[str] | None = None
         self._debug_log_path = Path.home() / "ims_ftims_debug.log"
@@ -74,6 +76,14 @@ class AcquisitionWorker(QThread):
                 "ftims_start_frequency_hz": self.config.ftims_config.start_frequency_hz,
                 "ftims_frequency_step_hz": self.config.ftims_config.frequency_step_hz,
                 "ftims_end_frequency_hz": self.config.ftims_config.end_frequency_hz,
+            })
+        elif self.config.operation_mode.value == "STEPPED_VSIMS" and self.config.vsims_config:
+            payload.update({
+                "vsims_initial_voltage_kv": self.config.vsims_config.initial_voltage_kv,
+                "vsims_final_voltage_kv": self.config.vsims_config.final_voltage_kv,
+                "vsims_voltage_step_v": self.config.vsims_config.voltage_step_v,
+                "vsims_time_add_ms": float(self.user_params.get("time_add_ms", self.config.vsims_config.time_add_ms)),
+                "vsims_ionization_bias_kv": float(self.config.vsims_config.ionization_bias_kv),
             })
 
         cmd = [
@@ -154,6 +164,9 @@ class AcquisitionWorker(QThread):
                         "raw_spectrum_points": event.get("raw_spectrum_points", {}),
                         "frequency_domain_data": event.get("frequency_domain_data", {}),
                         "peak_metrics": event.get("peak_metrics", {}),
+                        "vsims_voltage_kv": event.get("vsims_voltage_kv"),
+                        "vsims_sweep_iteration": event.get("vsims_sweep_iteration"),
+                        "vsims_raw_point": event.get("vsims_raw_point"),
                     }
                     
                     self.iteration_ready.emit(iteration, data, metadata)
@@ -164,6 +177,12 @@ class AcquisitionWorker(QThread):
                         self.ftims_raw_step.emit(freq_hz, signal)
                     except Exception:
                         pass
+                elif event_type == "vsims_sweep_complete":
+                    payload = {
+                        "sweep_iteration": int(event.get("sweep_iteration", 0)),
+                        "raw_spectrum_points": event.get("raw_spectrum_points", {}),
+                    }
+                    self.vsims_sweep_complete.emit(payload)
                 elif event_type == "finished":
                     self._debug_log("worker_finished")
                     self.finished_ok.emit()

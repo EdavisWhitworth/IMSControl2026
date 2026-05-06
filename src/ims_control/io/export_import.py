@@ -49,8 +49,13 @@ class ExperimentExporter:
         with h5py.File(file_path, "w") as h5:
             h5.attrs["created_at"] = experiment.created_at
             cfg_group = h5.create_group("config")
-            for k, v in experiment.config.to_dict().items():
-                cfg_group.attrs[k] = v
+            config_dict = experiment.config.to_dict()
+            # Keep a canonical JSON payload so nested mode configs round-trip reliably.
+            cfg_group.attrs["config_json"] = json.dumps(config_dict)
+            # Also preserve flat scalar attrs for backward compatibility/tools.
+            for k, v in config_dict.items():
+                if isinstance(v, (str, int, float, bool, np.number, np.bool_)):
+                    cfg_group.attrs[k] = v
 
             runs = h5.create_group("iterations")
             for i, y in enumerate(experiment.iterations, start=1):
@@ -62,8 +67,19 @@ class ExperimentImporter:
     @staticmethod
     def from_hdf5(file_path: str) -> ExperimentData:
         with h5py.File(file_path, "r") as h5:
-            cfg_attrs = dict(h5["config"].attrs)
-            config = ExperimentConfig.from_dict(cfg_attrs)
+            cfg_group = h5["config"]
+            raw_json = cfg_group.attrs.get("config_json")
+            if raw_json is not None:
+                if isinstance(raw_json, bytes):
+                    raw_json = raw_json.decode("utf-8", errors="replace")
+                config = ExperimentConfig.from_dict(json.loads(str(raw_json)))
+            else:
+                # Fallback for legacy files that stored scalar attrs only.
+                cfg_attrs = {
+                    key: (value.item() if isinstance(value, np.generic) else value)
+                    for key, value in dict(cfg_group.attrs).items()
+                }
+                config = ExperimentConfig.from_dict(cfg_attrs)
 
             exp = ExperimentData(config)
             exp.created_at = str(h5.attrs.get("created_at", exp.created_at))

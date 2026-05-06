@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
 )
 
-from ims_control.data_model.experiment import ExperimentConfig, OperationMode, FTIMSConfig
+from ims_control.data_model.experiment import ExperimentConfig, OperationMode, FTIMSConfig, SteppedVSIMSConfig
 
 
 class ExperimentConfigDialog(QDialog):
@@ -27,8 +27,12 @@ class ExperimentConfigDialog(QDialog):
 
         # Mode selection
         self.operation_mode = QComboBox()
-        self.operation_mode.addItems(["DTIMS", "FTIMS"])
-        self.operation_mode.setCurrentText(config.operation_mode.value)
+        self.operation_mode.addItems(["DTIMS", "FTIMS", "Stepped VSIMS"])
+        if config.operation_mode == OperationMode.STEPPED_VSIMS:
+            self.operation_mode.setCurrentText("Stepped VSIMS")
+        else:
+            self.operation_mode.setCurrentText(config.operation_mode.value)
+        self._last_mode_text = self.operation_mode.currentText()
         self.operation_mode.currentTextChanged.connect(self._on_mode_changed)
 
         # DTIMS controls (timing-based)
@@ -90,6 +94,36 @@ class ExperimentConfigDialog(QDialog):
         self.frequency_info = QLabel()
         self._update_frequency_info()
 
+        # VSIMS controls (voltage-stepped)
+        vsims_cfg = config.vsims_config or SteppedVSIMSConfig()
+
+        self.initial_voltage_kv = QDoubleSpinBox()
+        self.initial_voltage_kv.setDecimals(3)
+        self.initial_voltage_kv.setRange(0.1, 30.0)
+        self.initial_voltage_kv.setValue(vsims_cfg.initial_voltage_kv)
+        self.initial_voltage_kv.setSuffix(" kV")
+
+        self.final_voltage_kv = QDoubleSpinBox()
+        self.final_voltage_kv.setDecimals(3)
+        self.final_voltage_kv.setRange(0.1, 30.0)
+        self.final_voltage_kv.setValue(vsims_cfg.final_voltage_kv)
+        self.final_voltage_kv.setSuffix(" kV")
+
+        self.voltage_step_v = QDoubleSpinBox()
+        self.voltage_step_v.setDecimals(1)
+        self.voltage_step_v.setRange(1.0, 2000.0)
+        self.voltage_step_v.setValue(vsims_cfg.voltage_step_v)
+        self.voltage_step_v.setSuffix(" V")
+
+        self.ionization_bias_kv = QDoubleSpinBox()
+        self.ionization_bias_kv.setDecimals(3)
+        self.ionization_bias_kv.setRange(-1000.0, 1000.0)
+        self.ionization_bias_kv.setValue(vsims_cfg.ionization_bias_kv)
+        self.ionization_bias_kv.setSuffix(" kV")
+
+        self.vsims_info = QLabel()
+        self._update_vsims_info()
+
         # Build form layout
         form.addRow("Operation Mode", self.operation_mode)
         
@@ -109,8 +143,18 @@ class ExperimentConfigDialog(QDialog):
         ftims_form.addRow("", self.frequency_info)
         self.ftims_group.setLayout(ftims_form)
 
+        self.vsims_group = QGroupBox("Stepped VSIMS Settings")
+        vsims_form = QFormLayout()
+        vsims_form.addRow("Initial voltage", self.initial_voltage_kv)
+        vsims_form.addRow("Final voltage", self.final_voltage_kv)
+        vsims_form.addRow("Voltage step", self.voltage_step_v)
+        vsims_form.addRow("Ionization bias", self.ionization_bias_kv)
+        vsims_form.addRow("", self.vsims_info)
+        self.vsims_group.setLayout(vsims_form)
+
         form.addRow(self.dtims_group)
         form.addRow(self.ftims_group)
+        form.addRow(self.vsims_group)
 
         # Common settings
         form.addRow("Data points", self.data_points)
@@ -137,14 +181,28 @@ class ExperimentConfigDialog(QDialog):
         self.averages.valueChanged.connect(self._update_frequency_info)
         self.iterations.valueChanged.connect(self._update_frequency_info)
 
+        self.initial_voltage_kv.valueChanged.connect(self._update_vsims_info)
+        self.final_voltage_kv.valueChanged.connect(self._update_vsims_info)
+        self.voltage_step_v.valueChanged.connect(self._update_vsims_info)
+        self.averages.valueChanged.connect(self._update_vsims_info)
+        self.iterations.valueChanged.connect(self._update_vsims_info)
+        self.experiment_length_ms.valueChanged.connect(self._update_vsims_info)
+
         # Initial visibility
         self._on_mode_changed()
 
     def _on_mode_changed(self) -> None:
         """Toggle visibility of DTIMS/FTIMS controls based on selected mode."""
-        is_ftims = self.operation_mode.currentText() == "FTIMS"
+        mode = self.operation_mode.currentText()
+        is_ftims = mode == "FTIMS"
+        is_vsims = mode == "Stepped VSIMS"
+        if is_vsims and self._last_mode_text != "Stepped VSIMS":
+            self.pulse_width_ms.setValue(0.2)
+            self.experiment_length_ms.setValue(50.0)
         self.dtims_group.setVisible(not is_ftims)
         self.ftims_group.setVisible(is_ftims)
+        self.vsims_group.setVisible(is_vsims)
+        self._last_mode_text = mode
 
     def _update_frequency_info(self) -> None:
         """Update frequency step info display."""
@@ -165,14 +223,44 @@ class ExperimentConfigDialog(QDialog):
         except Exception:
             self.frequency_info.setText("Invalid frequency configuration")
 
+    def _update_vsims_info(self) -> None:
+        try:
+            vsims_cfg = SteppedVSIMSConfig(
+                initial_voltage_kv=self.initial_voltage_kv.value(),
+                final_voltage_kv=self.final_voltage_kv.value(),
+                voltage_step_v=self.voltage_step_v.value(),
+            )
+            points = vsims_cfg.total_voltages()
+            est_s = vsims_cfg.estimated_duration_seconds(
+                experiment_length_ms=self.experiment_length_ms.value(),
+                averages_per_iteration=self.averages.value(),
+                total_iterations=self.iterations.value(),
+            )
+            self.vsims_info.setText(f"Voltage points: {points}  |  Est. duration: {est_s:.1f}s")
+        except Exception:
+            self.vsims_info.setText("Invalid VSIMS voltage configuration")
+
     def to_config(self) -> ExperimentConfig:
-        mode = OperationMode.FTIMS if self.operation_mode.currentText() == "FTIMS" else OperationMode.DTIMS
+        if self.operation_mode.currentText() == "FTIMS":
+            mode = OperationMode.FTIMS
+        elif self.operation_mode.currentText() == "Stepped VSIMS":
+            mode = OperationMode.STEPPED_VSIMS
+        else:
+            mode = OperationMode.DTIMS
         
         ftims_config = FTIMSConfig(
             start_frequency_hz=self.start_frequency_hz.value(),
             frequency_step_hz=self.frequency_step_hz.value(),
             end_frequency_hz=self.end_frequency_hz.value(),
         ) if mode == OperationMode.FTIMS else FTIMSConfig()
+
+        vsims_config = SteppedVSIMSConfig(
+            initial_voltage_kv=self.initial_voltage_kv.value(),
+            final_voltage_kv=self.final_voltage_kv.value(),
+            voltage_step_v=self.voltage_step_v.value(),
+            time_add_ms=0.0,
+            ionization_bias_kv=self.ionization_bias_kv.value(),
+        ) if mode == OperationMode.STEPPED_VSIMS else SteppedVSIMSConfig()
 
         # For FTIMS mode, set pulse_width_ms to 50% of time_per_frequency_ms for proper duty cycle
         # For DTIMS mode, use the configured pulse_width_ms
@@ -198,6 +286,7 @@ class ExperimentConfigDialog(QDialog):
             positive_mode=self.polarity_mode.currentText() == "Positive",
             use_simulation=self.simulation.isChecked(),
             ftims_config=ftims_config,
+            vsims_config=vsims_config,
         )
 
     def should_save_as_default(self) -> bool:
