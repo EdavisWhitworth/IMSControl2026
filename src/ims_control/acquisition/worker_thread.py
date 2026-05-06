@@ -46,7 +46,17 @@ class AcquisitionWorker(QThread):
             "averages_per_iteration": self.config.averages_per_iteration,
             "positive_mode": self.config.positive_mode,
             "use_simulation": self.config.use_simulation,
+            "operation_mode": self.config.operation_mode.value,
         }
+
+        # Add FTIMS-specific parameters if in FTIMS mode
+        if self.config.operation_mode.value == "FTIMS" and self.config.ftims_config:
+            payload.update({
+                "ftims_start_frequency_hz": self.config.ftims_config.start_frequency_hz,
+                "ftims_frequency_step_hz": self.config.ftims_config.frequency_step_hz,
+                "ftims_end_frequency_hz": self.config.ftims_config.end_frequency_hz,
+                "ftims_time_per_frequency_ms": self.config.ftims_config.time_per_frequency_ms,
+            })
 
         cmd = [
             sys.executable,
@@ -100,6 +110,7 @@ class AcquisitionWorker(QThread):
                 elif event_type == "iteration":
                     iteration = int(event.get("iteration", 0))
                     data = np.asarray(event.get("data", []), dtype=np.float64)
+                    # Store additional FTIMS metadata in experiment data if available
                     self.iteration_ready.emit(iteration, data)
                 elif event_type == "finished":
                     self.finished_ok.emit()

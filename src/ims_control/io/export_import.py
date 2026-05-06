@@ -63,18 +63,7 @@ class ExperimentImporter:
     def from_hdf5(file_path: str) -> ExperimentData:
         with h5py.File(file_path, "r") as h5:
             cfg_attrs = dict(h5["config"].attrs)
-            config = ExperimentConfig(
-                pulse_width_ms=float(cfg_attrs.get("pulse_width_ms", 1.0)),
-                experiment_length_ms=float(cfg_attrs.get("experiment_length_ms", 50.0)),
-                data_points=int(cfg_attrs.get("data_points", 4000)),
-                averages_per_iteration=int(cfg_attrs.get("averages_per_iteration", 10)),
-                total_iterations=int(cfg_attrs.get("total_iterations", 1)),
-                ai_channel=str(cfg_attrs.get("ai_channel", "Dev1/ai0")),
-                counter_channel=str(cfg_attrs.get("counter_channel", "Dev1/ctr0")),
-                pfi_trigger=str(cfg_attrs.get("pfi_trigger", "Dev1/PFI0")),
-                positive_mode=bool(cfg_attrs.get("positive_mode", False)),
-                use_simulation=bool(cfg_attrs.get("use_simulation", False)),
-            )
+            config = ExperimentConfig.from_dict(cfg_attrs)
 
             exp = ExperimentData(config)
             exp.created_at = str(h5.attrs.get("created_at", exp.created_at))
