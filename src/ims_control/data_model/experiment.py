@@ -14,6 +14,7 @@ class OperationMode(Enum):
     FTIMS = "FTIMS"  # Fourier Transform Ion Mobility Spectrometry
     SWEPT_FTIMS = "SWEPT_FTIMS"  # Frequency-swept FTIMS
     STEPPED_VSIMS = "STEPPED_VSIMS"  # Voltage-stepped IMS
+    SWEPT_VSIMS = "SWEPT_VSIMS"  # Voltage-swept IMS with buffered AO
 
 
 @dataclass
@@ -133,6 +134,30 @@ class SweptFTIMSConfig:
 
 
 @dataclass
+class SweptVSIMSConfig:
+    """Configuration for swept VSIMS mode."""
+
+    ionization_bias_kv: float = 0.0
+    v_add_kv: float = 0.0
+    gate_pulse_delay_ms: float = 10.0
+    ims_max_output_kv: float = 20.0
+    control_voltage_max_v: float = 10.0
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, object]) -> "SweptVSIMSConfig":
+        return cls(
+            ionization_bias_kv=float(raw.get("ionization_bias_kv", 0.0)),
+            v_add_kv=float(raw.get("v_add_kv", 0.0)),
+            gate_pulse_delay_ms=float(raw.get("gate_pulse_delay_ms", 10.0)),
+            ims_max_output_kv=float(raw.get("ims_max_output_kv", 20.0)),
+            control_voltage_max_v=float(raw.get("control_voltage_max_v", 10.0)),
+        )
+
+
+@dataclass
 class ExperimentConfig:
     operation_mode: OperationMode = OperationMode.DTIMS
     # DTIMS parameters
@@ -151,6 +176,7 @@ class ExperimentConfig:
     swept_ftims_config: Optional[SweptFTIMSConfig] = field(default_factory=SweptFTIMSConfig)
     # VSIMS parameters
     vsims_config: Optional[SteppedVSIMSConfig] = field(default_factory=SteppedVSIMSConfig)
+    swept_vsims_config: Optional[SweptVSIMSConfig] = field(default_factory=SweptVSIMSConfig)
 
     def to_dict(self) -> Dict[str, object]:
         config_dict = asdict(self)
@@ -162,6 +188,8 @@ class ExperimentConfig:
             config_dict["swept_ftims_config"] = self.swept_ftims_config.to_dict()
         if self.vsims_config:
             config_dict["vsims_config"] = self.vsims_config.to_dict()
+        if self.swept_vsims_config:
+            config_dict["swept_vsims_config"] = self.swept_vsims_config.to_dict()
         return config_dict
 
     @classmethod
@@ -179,6 +207,8 @@ class ExperimentConfig:
         swept_ftims_config = SweptFTIMSConfig.from_dict(swept_ftims_config_dict) if swept_ftims_config_dict else SweptFTIMSConfig()
         vsims_config_dict = raw.get("vsims_config")
         vsims_config = SteppedVSIMSConfig.from_dict(vsims_config_dict) if vsims_config_dict else SteppedVSIMSConfig()
+        swept_vsims_config_dict = raw.get("swept_vsims_config")
+        swept_vsims_config = SweptVSIMSConfig.from_dict(swept_vsims_config_dict) if swept_vsims_config_dict else SweptVSIMSConfig()
 
         return cls(
             operation_mode=operation_mode,
@@ -195,6 +225,7 @@ class ExperimentConfig:
             ftims_config=ftims_config,
             swept_ftims_config=swept_ftims_config,
             vsims_config=vsims_config,
+            swept_vsims_config=swept_vsims_config,
         )
 
 

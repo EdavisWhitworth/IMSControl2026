@@ -625,27 +625,28 @@ class MainWindow(QMainWindow):
         is_ftims = str(mode_value).upper() == "FTIMS"
         is_swept_ftims = str(mode_value).upper() == "SWEPT_FTIMS"
         is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
+        is_swept_vsims = str(mode_value).upper() == "SWEPT_VSIMS"
         if self.plot_tabs is not None and self.plot_tabs.count() > 4:
             self.plot_tabs.setTabVisible(3, is_ftims)
             self.plot_tabs.setTabVisible(4, is_vsims)
         if self.heat_plot is not None:
             self.heat_plot.setLabel("bottom", "Voltage (kV)" if is_vsims else "Iteration")
             self.heat_plot.setLabel("left", "Frequency (Hz)" if (is_ftims or is_swept_ftims) else "Time (ms)")
-            self.heat_plot.setTitle("Frequency Heatmap (FTIMS)" if is_ftims else ("Swept FTIMS FFT Heatmap" if is_swept_ftims else ("Voltage Heatmap (VSIMS)" if is_vsims else "Iterations Heatmap (DTIMS)")))
+            self.heat_plot.setTitle("Frequency Heatmap (FTIMS)" if is_ftims else ("Swept FTIMS FFT Heatmap" if is_swept_ftims else ("Voltage Heatmap (VSIMS)" if is_vsims else ("Iterations Heatmap (Swept VSIMS)" if is_swept_vsims else "Iterations Heatmap (DTIMS)"))))
         if self.line_plot is not None:
-            self.line_plot.setTitle("FTIMS Mobility-Domain Spectrum" if is_ftims else ("Swept FTIMS Raw Signal" if is_swept_ftims else ("VSIMS Trace" if is_vsims else "IMS Signal")))
+            self.line_plot.setTitle("FTIMS Mobility-Domain Spectrum" if is_ftims else ("Swept FTIMS Raw Signal" if is_swept_ftims else ("VSIMS Trace" if is_vsims else ("Swept VSIMS Trace" if is_swept_vsims else "IMS Signal"))))
         if self.line_plot_from_heat is not None:
-            self.line_plot_from_heat.setTitle("Selected Frequency Spectrum (FTIMS)" if is_ftims else ("Swept FTIMS Raw Signal (Selected Iteration)" if is_swept_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else "IMS Signal (Selected from Heatmap)")))
+            self.line_plot_from_heat.setTitle("Selected Frequency Spectrum (FTIMS)" if is_ftims else ("Swept FTIMS Raw Signal (Selected Iteration)" if is_swept_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else ("Swept VSIMS Signal (Selected Iteration)" if is_swept_vsims else "IMS Signal (Selected from Heatmap)"))))
         if self.swept_fft_plot is not None:
             self.swept_fft_plot.setVisible(is_swept_ftims)
         if self.selected_swept_fft_plot is not None:
             self.selected_swept_fft_plot.setVisible(is_swept_ftims)
         if self.voltage_spinbox is not None:
-            self.voltage_spinbox.setVisible(not is_vsims)
+            self.voltage_spinbox.setVisible(not is_vsims and not is_swept_vsims)
         if self.voltage_label is not None:
-            self.voltage_label.setVisible(not is_vsims)
+            self.voltage_label.setVisible(not is_vsims and not is_swept_vsims)
         if self.btn_hv_settings is not None:
-            self.btn_hv_settings.setVisible(not is_vsims)
+            self.btn_hv_settings.setVisible(not is_vsims and not is_swept_vsims)
         self._update_vsims_heat_overlay()
 
     def _refresh_hv_control_states(self) -> None:
@@ -653,8 +654,9 @@ class MainWindow(QMainWindow):
         acquisition_active = self.worker is not None and self.worker.isRunning()
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
+        is_swept_vsims = str(mode_value).upper() == "SWEPT_VSIMS"
         self.btn_hv_enable.setEnabled(not hv_busy)
-        self.btn_hv_settings.setEnabled((not hv_busy) and (not is_vsims))
+        self.btn_hv_settings.setEnabled((not hv_busy) and (not is_vsims) and (not is_swept_vsims))
         self.btn_hv_update.setEnabled(self.hv_enabled and (not hv_busy) and (not acquisition_active))
 
     def _create_axis_controls(self, parent_layout: QVBoxLayout, key: str) -> dict[str, object]:
@@ -1084,6 +1086,30 @@ class MainWindow(QMainWindow):
         ion_v = (ion_total_kv / max_kv) * ctrl_max_v
         return ims_v, ion_v, ion_total_kv
 
+    def _calculate_swept_vsims_start_hv_outputs(self) -> tuple[float, float, float]:
+        if self.config.swept_vsims_config is None:
+            raise ValueError("Missing Swept VSIMS configuration.")
+
+        gate_mult = float(self.gate_v_multiplier_spinbox.value()) if self.gate_v_multiplier_spinbox is not None else 1.0
+        if gate_mult <= 0.0:
+            raise ValueError("Gate V Multiplier must be greater than 0.")
+
+        cfg = self.config.swept_vsims_config
+        max_kv = float(cfg.ims_max_output_kv)
+        ctrl_max_v = float(cfg.control_voltage_max_v)
+        ims_kv = float(np.clip(float(cfg.v_add_kv) / gate_mult, 0.0, max_kv))
+        ion_total_kv = float(np.clip(ims_kv + float(cfg.ionization_bias_kv), 0.0, max_kv))
+
+        if max_kv <= 0.0:
+            raise ValueError("IMS max output must be greater than 0 kV.")
+        if ctrl_max_v <= 0.0:
+            raise ValueError("Control voltage max must be greater than 0 V.")
+
+        sign = 1.0 if self.config.positive_mode else -1.0
+        ims_v = sign * (ims_kv / max_kv) * ctrl_max_v
+        ion_v = sign * (ion_total_kv / max_kv) * ctrl_max_v
+        return ims_v, ion_v, ion_total_kv
+
     def _baseline_bounds(self, source: str) -> tuple[float, float]:
         del source
         return self._safe_bounds(self.noise_start_spinbox.value(), self.noise_end_spinbox.value())
@@ -1230,6 +1256,17 @@ class MainWindow(QMainWindow):
                 f"Averages: {cfg.averages_per_iteration}\n"
                 f"Iterations: {cfg.total_iterations}"
             )
+        elif cfg.operation_mode == OperationMode.SWEPT_VSIMS and cfg.swept_vsims_config is not None:
+            sv_cfg = cfg.swept_vsims_config
+            text = (
+                f"Added potential: {sv_cfg.v_add_kv:.3f} kV\n"
+                f"Ionization bias: {sv_cfg.ionization_bias_kv:.3f} kV\n"
+                f"Gate pulse delay: {sv_cfg.gate_pulse_delay_ms:.3f} ms\n"
+                f"IMS max output: {sv_cfg.ims_max_output_kv:.3f} kV\n"
+                f"Control voltage max: {sv_cfg.control_voltage_max_v:.3f} V\n"
+                f"Averages: {cfg.averages_per_iteration}\n"
+                f"Iterations: {cfg.total_iterations}"
+            )
         else:
             text = (
                 f"Pulse width: {cfg.pulse_width_ms} ms\n"
@@ -1296,8 +1333,12 @@ class MainWindow(QMainWindow):
 
     def _update_hv_status_label(self, ims_v: float, ion_v: float) -> None:
         state = "ON" if self.hv_enabled else "OFF"
-        ctrl_max_v = float(self.hv_config.control_voltage_max_v)
-        max_kv = float(self.hv_config.ims_max_output_kv)
+        if self.config.operation_mode == OperationMode.SWEPT_VSIMS and self.config.swept_vsims_config is not None:
+            ctrl_max_v = float(self.config.swept_vsims_config.control_voltage_max_v)
+            max_kv = float(self.config.swept_vsims_config.ims_max_output_kv)
+        else:
+            ctrl_max_v = float(self.hv_config.control_voltage_max_v)
+            max_kv = float(self.hv_config.ims_max_output_kv)
         ims_kv = 0.0
         ion_kv = 0.0
         if ctrl_max_v > 0.0 and max_kv > 0.0:
@@ -1454,6 +1495,15 @@ class MainWindow(QMainWindow):
                     f"(VSIMS start IMS={ims_kv:.3f} kV -> {ims_v:.3f} V, "
                     f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
                 )
+            elif self.config.operation_mode == OperationMode.SWEPT_VSIMS and self.config.swept_vsims_config is not None:
+                gate_mult = float(self.gate_v_multiplier_spinbox.value()) if self.gate_v_multiplier_spinbox is not None else 1.0
+                ims_kv = float(np.clip(self.config.swept_vsims_config.v_add_kv / max(1e-9, gate_mult), 0.0, self.config.swept_vsims_config.ims_max_output_kv))
+                ion_total_kv = float(np.clip(ims_kv + self.config.swept_vsims_config.ionization_bias_kv, 0.0, self.config.swept_vsims_config.ims_max_output_kv))
+                self.status_label.setText(
+                    "Status: HV enabled "
+                    f"(Swept VSIMS start IMS={ims_kv:.3f} kV -> {ims_v:.3f} V, "
+                    f"Ionization={ion_total_kv:.3f} kV -> {ion_v:.3f} V)"
+                )
             else:
                 _ims_v, _ion_v, ion_total_kv = self._calculate_hv_outputs()
                 self.status_label.setText(
@@ -1491,6 +1541,9 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Applying updated HV values...")
             if self.config.operation_mode == OperationMode.STEPPED_VSIMS:
                 ims_v, ion_v, _ion_total_kv = self._calculate_vsims_start_hv_outputs()
+                self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
+            elif self.config.operation_mode == OperationMode.SWEPT_VSIMS:
+                ims_v, ion_v, _ion_total_kv = self._calculate_swept_vsims_start_hv_outputs()
                 self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
             else:
                 self._start_hv_apply(enabled=True)
@@ -2114,6 +2167,9 @@ class MainWindow(QMainWindow):
             if bool(checked) and self.config.operation_mode == OperationMode.STEPPED_VSIMS:
                 ims_v, ion_v, _ion_total_kv = self._calculate_vsims_start_hv_outputs()
                 self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
+            elif bool(checked) and self.config.operation_mode == OperationMode.SWEPT_VSIMS:
+                ims_v, ion_v, _ion_total_kv = self._calculate_swept_vsims_start_hv_outputs()
+                self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
             else:
                 self._start_hv_apply(enabled=bool(checked))
         except Exception as exc:
@@ -2136,6 +2192,7 @@ class MainWindow(QMainWindow):
             OperationMode.FTIMS,
             OperationMode.SWEPT_FTIMS,
             OperationMode.STEPPED_VSIMS,
+            OperationMode.SWEPT_VSIMS,
         }
         if requires_hv and (not self.config.use_simulation) and not self.hv_enabled:
             QMessageBox.warning(
@@ -2254,6 +2311,7 @@ class MainWindow(QMainWindow):
         is_ftims = str(mode_value).upper() == "FTIMS"
         is_swept_ftims = str(mode_value).upper() == "SWEPT_FTIMS"
         is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
+        is_swept_vsims = str(mode_value).upper() == "SWEPT_VSIMS"
         if is_ftims:
             raw_points = metadata.get("raw_spectrum_points", {})
             if raw_points:
@@ -2298,6 +2356,18 @@ class MainWindow(QMainWindow):
                         self.plot_tabs.setTabVisible(4, True)
                 except Exception:
                     pass
+        elif is_swept_vsims:
+            vmin = metadata.get("vsims_v_opt_min_kv")
+            vmax = metadata.get("vsims_v_opt_max_kv")
+            clipped = bool(metadata.get("vsims_waveform_clipped", False))
+            if vmin is not None and vmax is not None:
+                try:
+                    self.status_label.setText(
+                        f"Status: Swept VSIMS iteration {iteration} waveform {float(vmin):.3f}->{float(vmax):.3f} kV"
+                        + (" (clipped)" if clipped else "")
+                    )
+                except (TypeError, ValueError):
+                    pass
         
         if iteration < 200:
             refresh_every = 5
@@ -2333,7 +2403,8 @@ class MainWindow(QMainWindow):
         if should_refresh_heatmap:
             self.update_heatmap()
 
-        self.status_label.setText(f"Status: Iteration {iteration} complete")
+        if not is_swept_vsims:
+            self.status_label.setText(f"Status: Iteration {iteration} complete")
 
     def on_vsims_sweep_complete(self, payload: dict) -> None:
         raw_points = payload.get("raw_spectrum_points", {}) if isinstance(payload, dict) else {}
@@ -2386,6 +2457,12 @@ class MainWindow(QMainWindow):
         if self.hv_enabled and self.config.operation_mode == OperationMode.STEPPED_VSIMS:
             try:
                 ims_v, ion_v, _ion_total_kv = self._calculate_vsims_start_hv_outputs()
+                self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
+            except Exception as exc:
+                QMessageBox.critical(self, "HV output error", str(exc))
+        elif self.hv_enabled and self.config.operation_mode == OperationMode.SWEPT_VSIMS:
+            try:
+                ims_v, ion_v, _ion_total_kv = self._calculate_swept_vsims_start_hv_outputs()
                 self._start_hv_apply(enabled=True, ims_v_override=ims_v, ion_v_override=ion_v)
             except Exception as exc:
                 QMessageBox.critical(self, "HV output error", str(exc))

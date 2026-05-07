@@ -20,6 +20,7 @@ from ims_control.data_model.experiment import (
     FTIMSConfig,
     SteppedVSIMSConfig,
     SweptFTIMSConfig,
+    SweptVSIMSConfig,
 )
 
 
@@ -33,9 +34,11 @@ class ExperimentConfigDialog(QDialog):
 
         # Mode selection
         self.operation_mode = QComboBox()
-        self.operation_mode.addItems(["DTIMS", "Stepped FTIMS", "Swept FTIMS", "Stepped VSIMS"])
+        self.operation_mode.addItems(["DTIMS", "Stepped FTIMS", "Swept FTIMS", "Stepped VSIMS", "Swept VSIMS"])
         if config.operation_mode == OperationMode.STEPPED_VSIMS:
             self.operation_mode.setCurrentText("Stepped VSIMS")
+        elif config.operation_mode == OperationMode.SWEPT_VSIMS:
+            self.operation_mode.setCurrentText("Swept VSIMS")
         elif config.operation_mode == OperationMode.SWEPT_FTIMS:
             self.operation_mode.setCurrentText("Swept FTIMS")
         elif config.operation_mode == OperationMode.FTIMS:
@@ -152,6 +155,38 @@ class ExperimentConfigDialog(QDialog):
         self.vsims_info = QLabel()
         self._update_vsims_info()
 
+        swept_vsims_cfg = config.swept_vsims_config or SweptVSIMSConfig()
+
+        self.swept_vsims_v_add_kv = QDoubleSpinBox()
+        self.swept_vsims_v_add_kv.setDecimals(3)
+        self.swept_vsims_v_add_kv.setRange(-1000.0, 1000.0)
+        self.swept_vsims_v_add_kv.setValue(swept_vsims_cfg.v_add_kv)
+        self.swept_vsims_v_add_kv.setSuffix(" kV")
+
+        self.swept_vsims_ionization_bias_kv = QDoubleSpinBox()
+        self.swept_vsims_ionization_bias_kv.setDecimals(3)
+        self.swept_vsims_ionization_bias_kv.setRange(-1000.0, 1000.0)
+        self.swept_vsims_ionization_bias_kv.setValue(swept_vsims_cfg.ionization_bias_kv)
+        self.swept_vsims_ionization_bias_kv.setSuffix(" kV")
+
+        self.swept_vsims_gate_pulse_delay_ms = QDoubleSpinBox()
+        self.swept_vsims_gate_pulse_delay_ms.setDecimals(3)
+        self.swept_vsims_gate_pulse_delay_ms.setRange(0.0, 10000.0)
+        self.swept_vsims_gate_pulse_delay_ms.setValue(swept_vsims_cfg.gate_pulse_delay_ms)
+        self.swept_vsims_gate_pulse_delay_ms.setSuffix(" ms")
+
+        self.swept_vsims_ims_max_output_kv = QDoubleSpinBox()
+        self.swept_vsims_ims_max_output_kv.setDecimals(3)
+        self.swept_vsims_ims_max_output_kv.setRange(0.001, 1000.0)
+        self.swept_vsims_ims_max_output_kv.setValue(swept_vsims_cfg.ims_max_output_kv)
+        self.swept_vsims_ims_max_output_kv.setSuffix(" kV")
+
+        self.swept_vsims_control_voltage_max_v = QDoubleSpinBox()
+        self.swept_vsims_control_voltage_max_v.setDecimals(3)
+        self.swept_vsims_control_voltage_max_v.setRange(0.001, 1000.0)
+        self.swept_vsims_control_voltage_max_v.setValue(swept_vsims_cfg.control_voltage_max_v)
+        self.swept_vsims_control_voltage_max_v.setSuffix(" V")
+
         # Build form layout
         form.addRow("Operation Mode", self.operation_mode)
         
@@ -187,10 +222,20 @@ class ExperimentConfigDialog(QDialog):
         vsims_form.addRow("", self.vsims_info)
         self.vsims_group.setLayout(vsims_form)
 
+        self.swept_vsims_group = QGroupBox("Swept VSIMS Settings")
+        swept_vsims_form = QFormLayout()
+        swept_vsims_form.addRow("Added potential", self.swept_vsims_v_add_kv)
+        swept_vsims_form.addRow("Ionization bias", self.swept_vsims_ionization_bias_kv)
+        swept_vsims_form.addRow("Gate pulse delay", self.swept_vsims_gate_pulse_delay_ms)
+        swept_vsims_form.addRow("IMS max output", self.swept_vsims_ims_max_output_kv)
+        swept_vsims_form.addRow("Control voltage max", self.swept_vsims_control_voltage_max_v)
+        self.swept_vsims_group.setLayout(swept_vsims_form)
+
         form.addRow(self.dtims_group)
         form.addRow(self.ftims_group)
         form.addRow(self.swept_ftims_group)
         form.addRow(self.vsims_group)
+        form.addRow(self.swept_vsims_group)
 
         # Common settings
         form.addRow("Data points", self.data_points)
@@ -233,13 +278,15 @@ class ExperimentConfigDialog(QDialog):
         is_ftims = mode == "Stepped FTIMS"
         is_swept_ftims = mode == "Swept FTIMS"
         is_vsims = mode == "Stepped VSIMS"
-        if is_vsims and self._last_mode_text != "Stepped VSIMS":
+        is_swept_vsims = mode == "Swept VSIMS"
+        if (is_vsims or is_swept_vsims) and self._last_mode_text not in {"Stepped VSIMS", "Swept VSIMS"}:
             self.pulse_width_ms.setValue(0.2)
             self.experiment_length_ms.setValue(50.0)
-        self.dtims_group.setVisible(not is_ftims and not is_swept_ftims)
+        self.dtims_group.setVisible((not is_ftims and not is_swept_ftims) or is_swept_vsims)
         self.ftims_group.setVisible(is_ftims)
         self.swept_ftims_group.setVisible(is_swept_ftims)
         self.vsims_group.setVisible(is_vsims)
+        self.swept_vsims_group.setVisible(is_swept_vsims)
         self._last_mode_text = mode
 
     def _update_frequency_info(self) -> None:
@@ -285,6 +332,8 @@ class ExperimentConfigDialog(QDialog):
             mode = OperationMode.SWEPT_FTIMS
         elif self.operation_mode.currentText() == "Stepped VSIMS":
             mode = OperationMode.STEPPED_VSIMS
+        elif self.operation_mode.currentText() == "Swept VSIMS":
+            mode = OperationMode.SWEPT_VSIMS
         else:
             mode = OperationMode.DTIMS
         
@@ -307,6 +356,14 @@ class ExperimentConfigDialog(QDialog):
             final_frequency_hz=self.swept_final_frequency_hz.value(),
             sweep_time_seconds=self.swept_time_seconds.value(),
         ) if mode == OperationMode.SWEPT_FTIMS else SweptFTIMSConfig()
+
+        swept_vsims_config = SweptVSIMSConfig(
+            ionization_bias_kv=self.swept_vsims_ionization_bias_kv.value(),
+            v_add_kv=self.swept_vsims_v_add_kv.value(),
+            gate_pulse_delay_ms=self.swept_vsims_gate_pulse_delay_ms.value(),
+            ims_max_output_kv=self.swept_vsims_ims_max_output_kv.value(),
+            control_voltage_max_v=self.swept_vsims_control_voltage_max_v.value(),
+        ) if mode == OperationMode.SWEPT_VSIMS else SweptVSIMSConfig()
 
         # For FTIMS mode, set pulse_width_ms to 50% of time_per_frequency_ms for proper duty cycle
         # For DTIMS mode, use the configured pulse_width_ms
@@ -339,6 +396,7 @@ class ExperimentConfigDialog(QDialog):
             ftims_config=ftims_config,
             swept_ftims_config=swept_ftims_config,
             vsims_config=vsims_config,
+            swept_vsims_config=swept_vsims_config,
         )
 
     def should_save_as_default(self) -> bool:

@@ -91,6 +91,18 @@ class AcquisitionWorker(QThread):
                 "vsims_time_add_ms": float(self.user_params.get("time_add_ms", self.config.vsims_config.time_add_ms)),
                 "vsims_ionization_bias_kv": float(self.config.vsims_config.ionization_bias_kv),
             })
+        elif self.config.operation_mode.value == "SWEPT_VSIMS" and self.config.swept_vsims_config:
+            payload.update({
+                "swept_vsims_v_add_kv": float(self.config.swept_vsims_config.v_add_kv),
+                "swept_vsims_gate_pulse_delay_ms": float(self.config.swept_vsims_config.gate_pulse_delay_ms),
+                "swept_vsims_ionization_bias_kv": float(self.config.swept_vsims_config.ionization_bias_kv),
+                "swept_vsims_ims_max_output_kv": float(self.config.swept_vsims_config.ims_max_output_kv),
+                "swept_vsims_control_voltage_max_v": float(self.config.swept_vsims_config.control_voltage_max_v),
+                "gate_v_multiplier": float(self.user_params.get("gate_v_multiplier", 1.0)),
+                "temperature_c": float(self.user_params.get("temperature_c", 20.0)),
+                "ao_ims_channel": str(self.user_params.get("ims_ao_channel", "")),
+                "ao_ion_channel": str(self.user_params.get("ion_ao_channel", "")),
+            })
 
         cmd = [
             sys.executable,
@@ -173,6 +185,9 @@ class AcquisitionWorker(QThread):
                         "vsims_voltage_kv": event.get("vsims_voltage_kv"),
                         "vsims_sweep_iteration": event.get("vsims_sweep_iteration"),
                         "vsims_raw_point": event.get("vsims_raw_point"),
+                        "vsims_v_opt_min_kv": event.get("vsims_v_opt_min_kv"),
+                        "vsims_v_opt_max_kv": event.get("vsims_v_opt_max_kv"),
+                        "vsims_waveform_clipped": event.get("vsims_waveform_clipped"),
                     }
                     
                     self.iteration_ready.emit(iteration, data, metadata)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -8,12 +9,13 @@ import numpy as np
 try:
     import nidaqmx
     from nidaqmx.constants import AcquisitionType, Edge, TerminalConfiguration, LineGrouping
-    from nidaqmx.stream_writers import CounterWriter
+    from nidaqmx.stream_writers import AnalogMultiChannelWriter, CounterWriter
     from nidaqmx.system import System
 except Exception:  # pragma: no cover
     nidaqmx = None
     AcquisitionType = Edge = TerminalConfiguration = None
     LineGrouping = None
+    AnalogMultiChannelWriter = None
     CounterWriter = None
     System = None
 
@@ -41,6 +43,15 @@ class NiUSB6351Controller:
         self._co_task: Optional[Any] = None
         self._counter_writer: Optional[Any] = None
         self._counter_started = False
+        self._swept_ai_task: Optional[Any] = None
+        self._swept_ao_task: Optional[Any] = None
+        self._swept_co_task: Optional[Any] = None
+        self._swept_samples_needed: int = 0
+        self._swept_trigger_source: str = ""
+        self._swept_ims_ao_channel: str = ""
+        self._swept_ion_ao_channel: str = ""
+        self._swept_gate_delay_ms: float = -1.0
+        self._swept_running = False
 
     @property
     def available(self) -> bool:
@@ -264,6 +275,7 @@ class NiUSB6351Controller:
             ) from e
 
     def close(self) -> None:
+        self.cleanup_swept_vsims_tasks()
         if self._ai_task is not None:
             try:
                 self._ai_task.close()
@@ -283,6 +295,162 @@ class NiUSB6351Controller:
             self._co_task = None
             self._counter_started = False
         self._counter_writer = None
+
+    def cleanup_swept_vsims_tasks(self) -> None:
+        if self._swept_co_task is not None and self._swept_running:
+            try:
+                self._swept_co_task.stop()
+            except Exception:
+                pass
+        if self._swept_ai_task is not None and self._swept_running:
+            try:
+                self._swept_ai_task.stop()
+            except Exception:
+                pass
+        if self._swept_ao_task is not None and self._swept_running:
+            try:
+                self._swept_ao_task.stop()
+            except Exception:
+                pass
+
+        if self._swept_ai_task is not None:
+            try:
+                self._swept_ai_task.close()
+            except Exception:
+                pass
+            self._swept_ai_task = None
+
+        if self._swept_ao_task is not None:
+            try:
+                self._swept_ao_task.close()
+            except Exception:
+                pass
+            self._swept_ao_task = None
+
+        if self._swept_co_task is not None:
+            try:
+                self._swept_co_task.close()
+            except Exception:
+                pass
+            self._swept_co_task = None
+
+        self._swept_samples_needed = 0
+        self._swept_trigger_source = ""
+        self._swept_ims_ao_channel = ""
+        self._swept_ion_ao_channel = ""
+        self._swept_gate_delay_ms = -1.0
+        self._swept_running = False
+
+    def _prepare_swept_vsims_tasks(
+        self,
+        ims_ao_channel: str,
+        ion_ao_channel: str,
+        ims_waveform: np.ndarray,
+        ion_waveform: np.ndarray,
+        gate_pulse_delay_ms: float,
+    ) -> None:
+        if nidaqmx is None:
+            raise RuntimeError("nidaqmx is not available")
+
+        # Release default DTIMS tasks so swept buffered tasks can own channels.
+        if self._ai_task is not None:
+            try:
+                self._ai_task.close()
+            except Exception:
+                pass
+            self._ai_task = None
+        if self._co_task is not None:
+            try:
+                if self._counter_started:
+                    self._co_task.stop()
+            except Exception:
+                pass
+            try:
+                self._co_task.close()
+            except Exception:
+                pass
+            self._co_task = None
+            self._counter_started = False
+
+        samples_needed = max(1, int(self.config.data_points))
+        if ims_waveform.shape[0] != samples_needed or ion_waveform.shape[0] != samples_needed:
+            raise ValueError("Swept VSIMS waveforms must match configured data_points")
+
+        trigger_source = self._counter_internal_output(self.config.counter_channel)
+        if not trigger_source:
+            trigger_source = self._normalize_trigger_source(self.config.pfi_trigger)
+
+        ims_ch = (ims_ao_channel or "").strip()
+        ion_ch = (ion_ao_channel or "").strip()
+        waveform_matrix = np.vstack((ims_waveform, ion_waveform))
+        pulse_width_s = max(1e-6, float(self.config.pulse_width_ms) / 1000.0)
+        experiment_length_s = max(1e-6, float(self.config.experiment_length_ms) / 1000.0)
+        gate_delay_s = max(0.0, float(gate_pulse_delay_ms) / 1000.0)
+        pulse_period_s = experiment_length_s + gate_delay_s
+        low_time_s = max(1e-6, pulse_period_s - pulse_width_s)
+
+        self.cleanup_swept_vsims_tasks()
+
+        try:
+            co_task = nidaqmx.Task()
+            ao_task = nidaqmx.Task()
+            ai_task = nidaqmx.Task()
+
+            co_task.co_channels.add_co_pulse_chan_time(
+                counter=self.config.counter_channel.strip(),
+                high_time=pulse_width_s,
+                low_time=low_time_s,
+            )
+            co_task.timing.cfg_implicit_timing(
+                sample_mode=AcquisitionType.CONTINUOUS,
+            )
+
+            ao_task.ao_channels.add_ao_voltage_chan(ims_ch)
+            ao_task.ao_channels.add_ao_voltage_chan(ion_ch)
+            ao_task.timing.cfg_samp_clk_timing(
+                rate=self.config.sample_rate_hz,
+                sample_mode=AcquisitionType.FINITE,
+                samps_per_chan=samples_needed,
+            )
+            if trigger_source:
+                ao_task.triggers.start_trigger.cfg_dig_edge_start_trig(trigger_source)
+                ao_task.triggers.start_trigger.retriggerable = True
+
+            if AnalogMultiChannelWriter is not None:
+                AnalogMultiChannelWriter(ao_task.out_stream).write_many_sample(waveform_matrix)
+            else:
+                ao_task.write(waveform_matrix, auto_start=False)
+
+            ai_task.ai_channels.add_ai_voltage_chan(
+                self.config.ai_channel,
+                terminal_config=TerminalConfiguration.RSE,
+            )
+            ai_task.timing.cfg_samp_clk_timing(
+                rate=self.config.sample_rate_hz,
+                sample_mode=AcquisitionType.FINITE,
+                samps_per_chan=samples_needed,
+            )
+            if trigger_source:
+                ai_task.triggers.start_trigger.cfg_dig_edge_start_trig(trigger_source)
+                ai_task.triggers.start_trigger.retriggerable = True
+
+            # Arm AO/AI once, then run counter continuously to emit repeated pulses.
+            ao_task.start()
+            ai_task.start()
+            co_task.start()
+
+            self._swept_co_task = co_task
+            self._swept_ao_task = ao_task
+            self._swept_ai_task = ai_task
+            self._swept_samples_needed = samples_needed
+            self._swept_trigger_source = trigger_source
+            self._swept_ims_ao_channel = ims_ch
+            self._swept_ion_ao_channel = ion_ch
+            self._swept_gate_delay_ms = float(gate_pulse_delay_ms)
+            self._swept_running = True
+        except Exception:
+            self.cleanup_swept_vsims_tasks()
+            raise
 
     def _set_counter_frequency(self, frequency_hz: float, duty_cycle: float = 0.5, start: bool = True) -> None:
         """Reconfigure counter output for a specific FTIMS step frequency."""
@@ -605,6 +773,90 @@ class NiUSB6351Controller:
             noise = self._rng.normal(0.0, 0.01, size=base.shape[0])
             return (scale * base + noise).astype(np.float64)
         return self.acquire_scan()
+
+    def acquire_swept_vsims_scan(
+        self,
+        ims_ao_channel: str,
+        ion_ao_channel: str,
+        ims_waveform_v: np.ndarray,
+        ion_waveform_v: np.ndarray,
+        gate_pulse_delay_ms: float,
+        initial_ims_v: float,
+        initial_ion_v: float,
+        restore_after_scan: bool = False,
+    ) -> np.ndarray:
+        """Acquire one swept VSIMS scan with synchronized AO and AI triggering."""
+        samples_needed = max(1, int(self.config.data_points))
+        ims_waveform = np.asarray(ims_waveform_v, dtype=np.float64).reshape(-1)
+        ion_waveform = np.asarray(ion_waveform_v, dtype=np.float64).reshape(-1)
+        if ims_waveform.shape[0] != samples_needed or ion_waveform.shape[0] != samples_needed:
+            raise ValueError("Swept VSIMS waveforms must match configured data_points")
+
+        if not self.available:
+            base = self._simulate_scan()
+            scale = max(0.05, float(np.max(np.abs(ims_waveform))) / 5.0)
+            noise = self._rng.normal(0.0, 0.01, size=base.shape[0])
+            return (scale * base + noise).astype(np.float64)
+
+        ims_ch = (ims_ao_channel or "").strip()
+        ion_ch = (ion_ao_channel or "").strip()
+
+        tasks_ready = (
+            self._swept_ai_task is not None
+            and self._swept_ao_task is not None
+            and self._swept_co_task is not None
+            and self._swept_samples_needed == samples_needed
+            and self._swept_ims_ao_channel == ims_ch
+            and self._swept_ion_ao_channel == ion_ch
+            and abs(self._swept_gate_delay_ms - float(gate_pulse_delay_ms)) <= 1e-9
+            and self._swept_running
+        )
+
+        if not tasks_ready:
+            try:
+                self._prepare_swept_vsims_tasks(
+                    ims_ao_channel=ims_ch,
+                    ion_ao_channel=ion_ch,
+                    ims_waveform=ims_waveform,
+                    ion_waveform=ion_waveform,
+                    gate_pulse_delay_ms=gate_pulse_delay_ms,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Swept VSIMS task preparation failed: {exc}") from exc
+
+        ao_task = self._swept_ao_task
+        ai_task = self._swept_ai_task
+        co_task = self._swept_co_task
+        if ao_task is None or ai_task is None or co_task is None:
+            raise RuntimeError("Swept VSIMS tasks were not initialized")
+
+        try:
+            data = np.asarray(
+                ai_task.read(
+                    number_of_samples_per_channel=samples_needed,
+                    timeout=max(2.0, float(self.config.experiment_length_ms + gate_pulse_delay_ms) / 1000.0 + 2.0),
+                ),
+                dtype=np.float64,
+            )
+        except Exception as exc:
+            self.cleanup_swept_vsims_tasks()
+            raise RuntimeError(f"Swept VSIMS acquisition failed: {exc}") from exc
+
+        if restore_after_scan:
+            delay_s = max(0.0, float(gate_pulse_delay_ms) / 1000.0)
+            self.write_dual_analog_output(
+                ims_ao_channel,
+                ion_ao_channel,
+                float(initial_ims_v),
+                float(initial_ion_v),
+            )
+            if delay_s > 0.0:
+                time.sleep(delay_s)
+        else:
+            # Inter-pulse delay is now handled by continuous counter period.
+            pass
+
+        return data
 
     def write_analog_output(self, channel: str, voltage: float) -> None:
         """Write a single analog-output voltage on the provided AO channel."""
