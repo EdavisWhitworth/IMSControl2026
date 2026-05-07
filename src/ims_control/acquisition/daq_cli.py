@@ -228,6 +228,84 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
 
+        elif operation_mode == "SWEPT_FTIMS":
+            initial_freq = float(payload.get("swept_ftims_initial_frequency_hz", 1.0))
+            final_freq = float(payload.get("swept_ftims_final_frequency_hz", 8000.0))
+            sweep_time_s = max(1e-3, float(payload.get("swept_ftims_sweep_time_seconds", 4.0)))
+            estimated_pulses = int(np.clip(round(0.5 * (initial_freq + final_freq) * sweep_time_s), 2, 100_000))
+
+            for iteration in range(1, total_iterations + 1):
+                acc: np.ndarray | None = None
+                _emit(
+                    {
+                        "type": "status",
+                        "message": (
+                            f"Swept FTIMS iteration {iteration}/{total_iterations}: "
+                            f"buffered gate sweep {initial_freq:.1f}->{final_freq:.1f} Hz, "
+                            f"{sweep_time_s:.3f} s, ~{estimated_pulses} pulses"
+                        ),
+                    }
+                )
+
+                for avg_idx in range(1, averages_per_iteration + 1):
+                    sweep_signal = daq.acquire_ftims_swept_scan(
+                        initial_frequency_hz=initial_freq,
+                        final_frequency_hz=final_freq,
+                        sweep_time_seconds=sweep_time_s,
+                    )
+                    sweep_arr = np.asarray(sweep_signal, dtype=np.float64)
+                    if acc is None:
+                        acc = sweep_arr
+                    else:
+                        acc += sweep_arr
+
+                    _emit(
+                        {
+                            "type": "progress",
+                            "iteration": iteration,
+                            "total_iterations": total_iterations,
+                            "avg_count": avg_idx,
+                            "avg_total": averages_per_iteration,
+                            "current_frequency_hz": initial_freq,
+                            "total_frequencies": 1,
+                        }
+                    )
+
+                if acc is None:
+                    continue
+
+                averaged_td = acc / float(averages_per_iteration)
+                fft_mag_native = np.abs(np.fft.rfft(averaged_td))
+                sample_rate_hz = max(1e-9, float(cfg.data_points) / sweep_time_s)
+                fft_freq_native = np.fft.rfftfreq(cfg.data_points, d=1.0 / sample_rate_hz)
+
+                target_points = max(1, int(cfg.data_points))
+                if fft_mag_native.shape[0] != target_points:
+                    native_x = np.linspace(0.0, 1.0, fft_mag_native.shape[0], endpoint=True)
+                    target_x = np.linspace(0.0, 1.0, target_points, endpoint=True)
+                    fft_mag = np.interp(target_x, native_x, fft_mag_native)
+                    fft_freq = np.interp(target_x, native_x, fft_freq_native)
+                else:
+                    fft_mag = fft_mag_native
+                    fft_freq = fft_freq_native
+
+                if positive_mode:
+                    fft_mag = -fft_mag
+
+                peak_metrics = _extract_peak_metrics(np.abs(fft_mag))
+
+                _emit(
+                    {
+                        "type": "iteration",
+                        "iteration": iteration,
+                        "data": fft_mag.tolist(),
+                        "raw_time_domain_sweep": averaged_td.tolist(),
+                        "fft_frequency_bins_hz": fft_freq.tolist(),
+                        "fft_spectrum": fft_mag.tolist(),
+                        "peak_metrics": peak_metrics,
+                    }
+                )
+
         elif operation_mode == "STEPPED_VSIMS":
             initial_voltage_kv = float(payload.get("vsims_initial_voltage_kv", 4.0))
             final_voltage_kv = float(payload.get("vsims_final_voltage_kv", 8.0))

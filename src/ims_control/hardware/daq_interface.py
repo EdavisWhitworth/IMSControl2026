@@ -284,7 +284,7 @@ class NiUSB6351Controller:
             self._counter_started = False
         self._counter_writer = None
 
-    def _set_counter_frequency(self, frequency_hz: float, duty_cycle: float = 0.5) -> None:
+    def _set_counter_frequency(self, frequency_hz: float, duty_cycle: float = 0.5, start: bool = True) -> None:
         """Reconfigure counter output for a specific FTIMS step frequency."""
         if not self.available:
             return
@@ -316,15 +316,125 @@ class NiUSB6351Controller:
                 duty_cycle=duty,
             )
             co_task.timing.cfg_implicit_timing(sample_mode=AcquisitionType.CONTINUOUS)
-            co_task.start()
+            if start:
+                co_task.start()
             self._co_task = co_task
-            self._counter_started = True
+            self._counter_started = bool(start)
         except Exception:
             try:
                 co_task.close()
             except Exception:
                 pass
             raise
+
+    def acquire_ftims_swept_scan(
+        self,
+        initial_frequency_hz: float,
+        final_frequency_hz: float,
+        sweep_time_seconds: float,
+    ) -> np.ndarray:
+        """Acquire one swept-FTIMS time-domain scan.
+
+        The scan starts on the rising edge of the initial gate pulse and then
+        linearly updates the counter frequency until the requested final
+        frequency is reached.
+        """
+        samples_needed = max(1, int(self.config.data_points))
+        start_freq = max(1e-6, float(initial_frequency_hz))
+        stop_freq = max(1e-6, float(final_frequency_hz))
+        sweep_s = max(1e-3, float(sweep_time_seconds))
+
+        if not self.available:
+            t = np.linspace(0.0, sweep_s, samples_needed, endpoint=False, dtype=np.float64)
+            k = (stop_freq - start_freq) / max(1e-9, sweep_s)
+            phase = 2.0 * np.pi * (start_freq * t + 0.5 * k * t * t)
+            gate_like = np.where(np.sin(phase) >= 0.0, 1.0, -1.0)
+            envelope = np.exp(-t / max(1e-6, 0.45 * sweep_s))
+            noise = self._rng.normal(0.0, 0.02, size=samples_needed)
+            return (0.8 * gate_like * envelope + 0.2 * np.sin(phase) + noise).astype(np.float64)
+
+        if nidaqmx is None:
+            raise RuntimeError("nidaqmx is not available")
+
+        internal_trigger_source = self._counter_internal_output(self.config.counter_channel)
+        trigger_source = internal_trigger_source or self._normalize_trigger_source(self.config.pfi_trigger)
+
+        # Free any persistent tasks so local buffered sweep tasks can own channels.
+        if self._ai_task is not None:
+            try:
+                self._ai_task.close()
+            except Exception:
+                pass
+            self._ai_task = None
+        if self._co_task is not None:
+            try:
+                if self._counter_started:
+                    self._co_task.stop()
+            except Exception:
+                pass
+            try:
+                self._co_task.close()
+            except Exception:
+                pass
+            self._co_task = None
+            self._counter_started = False
+
+        # One pulse per buffered sample gives a continuous, evenly spaced sweep with no software gaps.
+        avg_freq = max(1e-6, 0.5 * (start_freq + stop_freq))
+        pulse_count = int(np.clip(round(avg_freq * sweep_s), 2, 100_000))
+        freq_schedule = np.linspace(start_freq, stop_freq, pulse_count, endpoint=True, dtype=np.float64)
+        duty_schedule = np.full(pulse_count, 0.5, dtype=np.float64)
+
+        with nidaqmx.Task() as co_task, nidaqmx.Task() as ai_task:
+            try:
+                co_task.co_channels.add_co_pulse_chan_freq(
+                    counter=self.config.counter_channel.strip(),
+                    freq=float(freq_schedule[0]),
+                    duty_cycle=0.5,
+                )
+                co_task.timing.cfg_implicit_timing(
+                    sample_mode=AcquisitionType.FINITE,
+                    samps_per_chan=pulse_count,
+                )
+
+                if CounterWriter is None:
+                    raise RuntimeError("Buffered sweep requires nidaqmx CounterWriter support")
+
+                writer = CounterWriter(co_task.out_stream)
+                writer.write_many_sample_pulse_frequency(
+                    freq_schedule,
+                    duty_schedule,
+                )
+
+                ai_task.ai_channels.add_ai_voltage_chan(
+                    self.config.ai_channel,
+                    terminal_config=TerminalConfiguration.RSE,
+                )
+                ai_task.timing.cfg_samp_clk_timing(
+                    rate=self.config.sample_rate_hz,
+                    sample_mode=AcquisitionType.FINITE,
+                    samps_per_chan=samples_needed,
+                )
+                if trigger_source:
+                    ai_task.triggers.start_trigger.cfg_dig_edge_start_trig(trigger_source)
+                    ai_task.triggers.start_trigger.retriggerable = False
+
+                # Arm AI first, then start buffered counter sweep to generate first rising-edge trigger.
+                ai_task.start()
+                co_task.start()
+
+                data = np.asarray(
+                    ai_task.read(number_of_samples_per_channel=samples_needed),
+                    dtype=np.float64,
+                )
+                ai_task.stop()
+                try:
+                    co_task.wait_until_done(timeout=max(1.0, sweep_s + 1.0))
+                except Exception:
+                    pass
+                return data
+            except Exception as exc:
+                raise RuntimeError(f"Swept FTIMS acquisition failed: {exc}") from exc
 
     def acquire_scan(self) -> np.ndarray:
         if not self.available:

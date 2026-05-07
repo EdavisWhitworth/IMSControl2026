@@ -12,6 +12,7 @@ class OperationMode(Enum):
     """Enumeration of IMS operation modes."""
     DTIMS = "DTIMS"  # Drift Time Ion Mobility Spectrometry
     FTIMS = "FTIMS"  # Fourier Transform Ion Mobility Spectrometry
+    SWEPT_FTIMS = "SWEPT_FTIMS"  # Frequency-swept FTIMS
     STEPPED_VSIMS = "STEPPED_VSIMS"  # Voltage-stepped IMS
 
 
@@ -112,6 +113,26 @@ class SteppedVSIMSConfig:
 
 
 @dataclass
+class SweptFTIMSConfig:
+    """Configuration for swept FTIMS mode."""
+
+    initial_frequency_hz: float = 1.0
+    final_frequency_hz: float = 8000.0
+    sweep_time_seconds: float = 4.0
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, object]) -> "SweptFTIMSConfig":
+        return cls(
+            initial_frequency_hz=float(raw.get("initial_frequency_hz", 1.0)),
+            final_frequency_hz=float(raw.get("final_frequency_hz", 8000.0)),
+            sweep_time_seconds=float(raw.get("sweep_time_seconds", 4.0)),
+        )
+
+
+@dataclass
 class ExperimentConfig:
     operation_mode: OperationMode = OperationMode.DTIMS
     # DTIMS parameters
@@ -127,6 +148,7 @@ class ExperimentConfig:
     use_simulation: bool = False
     # FTIMS parameters
     ftims_config: Optional[FTIMSConfig] = field(default_factory=FTIMSConfig)
+    swept_ftims_config: Optional[SweptFTIMSConfig] = field(default_factory=SweptFTIMSConfig)
     # VSIMS parameters
     vsims_config: Optional[SteppedVSIMSConfig] = field(default_factory=SteppedVSIMSConfig)
 
@@ -136,6 +158,8 @@ class ExperimentConfig:
         config_dict["operation_mode"] = self.operation_mode.value
         if self.ftims_config:
             config_dict["ftims_config"] = self.ftims_config.to_dict()
+        if self.swept_ftims_config:
+            config_dict["swept_ftims_config"] = self.swept_ftims_config.to_dict()
         if self.vsims_config:
             config_dict["vsims_config"] = self.vsims_config.to_dict()
         return config_dict
@@ -151,6 +175,8 @@ class ExperimentConfig:
 
         ftims_config_dict = raw.get("ftims_config")
         ftims_config = FTIMSConfig.from_dict(ftims_config_dict) if ftims_config_dict else FTIMSConfig()
+        swept_ftims_config_dict = raw.get("swept_ftims_config")
+        swept_ftims_config = SweptFTIMSConfig.from_dict(swept_ftims_config_dict) if swept_ftims_config_dict else SweptFTIMSConfig()
         vsims_config_dict = raw.get("vsims_config")
         vsims_config = SteppedVSIMSConfig.from_dict(vsims_config_dict) if vsims_config_dict else SteppedVSIMSConfig()
 
@@ -167,6 +193,7 @@ class ExperimentConfig:
             positive_mode=bool(raw.get("positive_mode", False)),
             use_simulation=bool(raw.get("use_simulation", False)),
             ftims_config=ftims_config,
+            swept_ftims_config=swept_ftims_config,
             vsims_config=vsims_config,
         )
 
@@ -256,7 +283,7 @@ class ExperimentData:
         """
         y_arr = np.asarray(y, dtype=np.float64)
         if y_arr.shape[0] != self._matrix.shape[1]:
-            if self.config.operation_mode == OperationMode.FTIMS and self.iteration_count() == 0:
+            if self.config.operation_mode in {OperationMode.FTIMS, OperationMode.SWEPT_FTIMS} and self.iteration_count() == 0:
                 self._resize_point_count(y_arr.shape[0])
             else:
                 raise ValueError(

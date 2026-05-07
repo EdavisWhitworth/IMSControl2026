@@ -77,6 +77,12 @@ class AcquisitionWorker(QThread):
                 "ftims_frequency_step_hz": self.config.ftims_config.frequency_step_hz,
                 "ftims_end_frequency_hz": self.config.ftims_config.end_frequency_hz,
             })
+        elif self.config.operation_mode.value == "SWEPT_FTIMS" and self.config.swept_ftims_config:
+            payload.update({
+                "swept_ftims_initial_frequency_hz": self.config.swept_ftims_config.initial_frequency_hz,
+                "swept_ftims_final_frequency_hz": self.config.swept_ftims_config.final_frequency_hz,
+                "swept_ftims_sweep_time_seconds": self.config.swept_ftims_config.sweep_time_seconds,
+            })
         elif self.config.operation_mode.value == "STEPPED_VSIMS" and self.config.vsims_config:
             payload.update({
                 "vsims_initial_voltage_kv": self.config.vsims_config.initial_voltage_kv,

@@ -14,7 +14,13 @@ from PyQt5.QtWidgets import (
     QGroupBox,
 )
 
-from ims_control.data_model.experiment import ExperimentConfig, OperationMode, FTIMSConfig, SteppedVSIMSConfig
+from ims_control.data_model.experiment import (
+    ExperimentConfig,
+    OperationMode,
+    FTIMSConfig,
+    SteppedVSIMSConfig,
+    SweptFTIMSConfig,
+)
 
 
 class ExperimentConfigDialog(QDialog):
@@ -27,14 +33,17 @@ class ExperimentConfigDialog(QDialog):
 
         # Mode selection
         self.operation_mode = QComboBox()
-        self.operation_mode.addItems(["DTIMS", "FTIMS", "Stepped VSIMS"])
+        self.operation_mode.addItems(["DTIMS", "Stepped FTIMS", "Swept FTIMS", "Stepped VSIMS"])
         if config.operation_mode == OperationMode.STEPPED_VSIMS:
             self.operation_mode.setCurrentText("Stepped VSIMS")
+        elif config.operation_mode == OperationMode.SWEPT_FTIMS:
+            self.operation_mode.setCurrentText("Swept FTIMS")
+        elif config.operation_mode == OperationMode.FTIMS:
+            self.operation_mode.setCurrentText("Stepped FTIMS")
         else:
             self.operation_mode.setCurrentText(config.operation_mode.value)
         self._last_mode_text = self.operation_mode.currentText()
         self.operation_mode.currentTextChanged.connect(self._on_mode_changed)
-
         # DTIMS controls (timing-based)
         self.pulse_width_ms = QDoubleSpinBox()
         self.pulse_width_ms.setDecimals(3)
@@ -94,6 +103,25 @@ class ExperimentConfigDialog(QDialog):
         self.frequency_info = QLabel()
         self._update_frequency_info()
 
+        # Swept FTIMS controls
+        swept_cfg = config.swept_ftims_config or SweptFTIMSConfig()
+
+        self.swept_initial_frequency_hz = QDoubleSpinBox()
+        self.swept_initial_frequency_hz.setDecimals(1)
+        self.swept_initial_frequency_hz.setRange(1.0, 10000.0)
+        self.swept_initial_frequency_hz.setValue(swept_cfg.initial_frequency_hz)
+
+        self.swept_final_frequency_hz = QDoubleSpinBox()
+        self.swept_final_frequency_hz.setDecimals(1)
+        self.swept_final_frequency_hz.setRange(1.0, 10000.0)
+        self.swept_final_frequency_hz.setValue(swept_cfg.final_frequency_hz)
+
+        self.swept_time_seconds = QDoubleSpinBox()
+        self.swept_time_seconds.setDecimals(3)
+        self.swept_time_seconds.setRange(0.01, 120.0)
+        self.swept_time_seconds.setValue(swept_cfg.sweep_time_seconds)
+        self.swept_time_seconds.setSuffix(" s")
+
         # VSIMS controls (voltage-stepped)
         vsims_cfg = config.vsims_config or SteppedVSIMSConfig()
 
@@ -135,13 +163,20 @@ class ExperimentConfigDialog(QDialog):
         self.dtims_group.setLayout(dtims_form)
 
         # FTIMS section
-        self.ftims_group = QGroupBox("FTIMS Settings")
+        self.ftims_group = QGroupBox("Stepped FTIMS Settings")
         ftims_form = QFormLayout()
         ftims_form.addRow("Start frequency (Hz)", self.start_frequency_hz)
         ftims_form.addRow("Frequency step (Hz)", self.frequency_step_hz)
         ftims_form.addRow("End frequency (Hz)", self.end_frequency_hz)
         ftims_form.addRow("", self.frequency_info)
         self.ftims_group.setLayout(ftims_form)
+
+        self.swept_ftims_group = QGroupBox("Swept FTIMS Settings")
+        swept_ftims_form = QFormLayout()
+        swept_ftims_form.addRow("Initial frequency (Hz)", self.swept_initial_frequency_hz)
+        swept_ftims_form.addRow("Final frequency (Hz)", self.swept_final_frequency_hz)
+        swept_ftims_form.addRow("Sweep time (s)", self.swept_time_seconds)
+        self.swept_ftims_group.setLayout(swept_ftims_form)
 
         self.vsims_group = QGroupBox("Stepped VSIMS Settings")
         vsims_form = QFormLayout()
@@ -154,6 +189,7 @@ class ExperimentConfigDialog(QDialog):
 
         form.addRow(self.dtims_group)
         form.addRow(self.ftims_group)
+        form.addRow(self.swept_ftims_group)
         form.addRow(self.vsims_group)
 
         # Common settings
@@ -194,13 +230,15 @@ class ExperimentConfigDialog(QDialog):
     def _on_mode_changed(self) -> None:
         """Toggle visibility of DTIMS/FTIMS controls based on selected mode."""
         mode = self.operation_mode.currentText()
-        is_ftims = mode == "FTIMS"
+        is_ftims = mode == "Stepped FTIMS"
+        is_swept_ftims = mode == "Swept FTIMS"
         is_vsims = mode == "Stepped VSIMS"
         if is_vsims and self._last_mode_text != "Stepped VSIMS":
             self.pulse_width_ms.setValue(0.2)
             self.experiment_length_ms.setValue(50.0)
-        self.dtims_group.setVisible(not is_ftims)
+        self.dtims_group.setVisible(not is_ftims and not is_swept_ftims)
         self.ftims_group.setVisible(is_ftims)
+        self.swept_ftims_group.setVisible(is_swept_ftims)
         self.vsims_group.setVisible(is_vsims)
         self._last_mode_text = mode
 
@@ -241,8 +279,10 @@ class ExperimentConfigDialog(QDialog):
             self.vsims_info.setText("Invalid VSIMS voltage configuration")
 
     def to_config(self) -> ExperimentConfig:
-        if self.operation_mode.currentText() == "FTIMS":
+        if self.operation_mode.currentText() == "Stepped FTIMS":
             mode = OperationMode.FTIMS
+        elif self.operation_mode.currentText() == "Swept FTIMS":
+            mode = OperationMode.SWEPT_FTIMS
         elif self.operation_mode.currentText() == "Stepped VSIMS":
             mode = OperationMode.STEPPED_VSIMS
         else:
@@ -262,6 +302,12 @@ class ExperimentConfigDialog(QDialog):
             ionization_bias_kv=self.ionization_bias_kv.value(),
         ) if mode == OperationMode.STEPPED_VSIMS else SteppedVSIMSConfig()
 
+        swept_ftims_config = SweptFTIMSConfig(
+            initial_frequency_hz=self.swept_initial_frequency_hz.value(),
+            final_frequency_hz=self.swept_final_frequency_hz.value(),
+            sweep_time_seconds=self.swept_time_seconds.value(),
+        ) if mode == OperationMode.SWEPT_FTIMS else SweptFTIMSConfig()
+
         # For FTIMS mode, set pulse_width_ms to 50% of time_per_frequency_ms for proper duty cycle
         # For DTIMS mode, use the configured pulse_width_ms
         if mode == OperationMode.FTIMS:
@@ -269,6 +315,11 @@ class ExperimentConfigDialog(QDialog):
             pulse_width = step_ms / 2.0
             experiment_length = step_ms
             ftims_config.time_per_frequency_ms = step_ms
+        elif mode == OperationMode.SWEPT_FTIMS:
+            sweep_ms = max(1.0, 1000.0 * float(swept_ftims_config.sweep_time_seconds))
+            start_freq = max(1e-9, float(swept_ftims_config.initial_frequency_hz))
+            pulse_width = max(1e-3, (1000.0 / start_freq) * 0.5)
+            experiment_length = sweep_ms
         else:
             pulse_width = float(self.pulse_width_ms.value())
             experiment_length = float(self.experiment_length_ms.value())
@@ -286,6 +337,7 @@ class ExperimentConfigDialog(QDialog):
             positive_mode=self.polarity_mode.currentText() == "Positive",
             use_simulation=self.simulation.isChecked(),
             ftims_config=ftims_config,
+            swept_ftims_config=swept_ftims_config,
             vsims_config=vsims_config,
         )
 

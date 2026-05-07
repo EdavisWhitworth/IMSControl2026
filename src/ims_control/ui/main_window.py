@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 from datetime import datetime
+from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
@@ -194,11 +195,17 @@ class MainWindow(QMainWindow):
         self.ftims_raw_curve: Any | None = None
         self.ftims_raw_cursor_v: pg.InfiniteLine | None = None
         self.ftims_raw_cursor_h: pg.InfiniteLine | None = None
+        self.swept_fft_plot: pg.PlotWidget | None = None
+        self.swept_fft_curve: Any | None = None
+        self.selected_swept_fft_plot: pg.PlotWidget | None = None
+        self.selected_swept_fft_curve: Any | None = None
         self.vsims_optimized_plot: pg.PlotWidget | None = None
         self.vsims_optimized_curve: Any | None = None
         self.vsims_topt_curve: Any | None = None
         self.plot_tabs: QTabWidget | None = None
         self._vsims_iteration_voltages: list[float] = []
+        self._swept_raw_iterations: dict[int, np.ndarray] = {}
+        self._swept_fft_bins_hz: dict[int, np.ndarray] = {}
 
         self._line_peak_region: pg.LinearRegionItem | None = None
         self._line_fwhm_left: pg.InfiniteLine | None = None
@@ -417,9 +424,10 @@ class MainWindow(QMainWindow):
 
         # Line plot title and labels depend on mode
         is_ftims = self.config.operation_mode == OperationMode.FTIMS
+        is_swept_ftims = self.config.operation_mode == OperationMode.SWEPT_FTIMS
         is_vsims = self.config.operation_mode == OperationMode.STEPPED_VSIMS
-        plot_title = "FTIMS Mobility-Domain Spectrum" if is_ftims else ("VSIMS Trace" if is_vsims else "IMS Signal")
-        y_label = "Intensity" if is_ftims else "Signal"
+        plot_title = "FTIMS Mobility-Domain Spectrum" if is_ftims else ("Swept FTIMS Raw Signal" if is_swept_ftims else ("VSIMS Trace" if is_vsims else "IMS Signal"))
+        y_label = "Intensity" if (is_ftims or is_swept_ftims) else "Signal"
         x_label = "Drift time (ms)" if is_ftims else "Time (ms)"
         
         self.line_plot = pg.PlotWidget(title=plot_title)
@@ -443,13 +451,21 @@ class MainWindow(QMainWindow):
         self._line_fwhm_left.hide()
         self._line_fwhm_right.hide()
         line_layout.addWidget(self.line_plot)
+
+        self.swept_fft_plot = pg.PlotWidget(title="Swept FTIMS FFT")
+        self.swept_fft_plot.setLabel("left", "Intensity")
+        self.swept_fft_plot.setLabel("bottom", "Frequency (Hz)")
+        self.swept_fft_curve = self.swept_fft_plot.plot(pen=pg.mkPen("c", width=2))
+        line_layout.addWidget(self.swept_fft_plot)
+        self.swept_fft_plot.setVisible(is_swept_ftims)
+
         self._axis_controls["line"] = self._create_axis_controls(line_layout, "line")
 
         heat_tab = QWidget()
         heat_layout = QVBoxLayout(heat_tab)
         self.heat_view = pg.GraphicsLayoutWidget()
         heat_title = "Frequency Heatmap (FTIMS)" if is_ftims else ("Voltage Heatmap (VSIMS)" if is_vsims else "Iterations Heatmap (DTIMS)")
-        heat_y_label = "Frequency (Hz)" if is_ftims else "Time (ms)"
+        heat_y_label = "Frequency (Hz)" if (is_ftims or is_swept_ftims) else "Time (ms)"
         self.heat_plot = self.heat_view.addPlot(title=heat_title)
         self.heat_plot.setLabel("left", heat_y_label)
         self.heat_plot.setLabel("bottom", "Voltage (kV)" if is_vsims else "Iteration")
@@ -470,7 +486,7 @@ class MainWindow(QMainWindow):
 
         selected_tab = QWidget()
         selected_layout = QVBoxLayout(selected_tab)
-        selected_title = "Selected Frequency Spectrum (FTIMS)" if is_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else "IMS Signal (Selected from Heatmap)")
+        selected_title = "Selected Frequency Spectrum (FTIMS)" if is_ftims else ("Swept FTIMS Raw Signal (Selected Iteration)" if is_swept_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else "IMS Signal (Selected from Heatmap)"))
         selected_x_label = "Drift time (ms)" if is_ftims else "Time (ms)"
         self.line_plot_from_heat = pg.PlotWidget(title=selected_title)
         self.line_plot_from_heat.setLabel("left", y_label)
@@ -493,6 +509,14 @@ class MainWindow(QMainWindow):
         self._selected_fwhm_left.hide()
         self._selected_fwhm_right.hide()
         selected_layout.addWidget(self.line_plot_from_heat)
+
+        self.selected_swept_fft_plot = pg.PlotWidget(title="Swept FTIMS FFT (Selected Iteration)")
+        self.selected_swept_fft_plot.setLabel("left", "Intensity")
+        self.selected_swept_fft_plot.setLabel("bottom", "Frequency (Hz)")
+        self.selected_swept_fft_curve = self.selected_swept_fft_plot.plot(pen=pg.mkPen("c", width=2))
+        selected_layout.addWidget(self.selected_swept_fft_plot)
+        self.selected_swept_fft_plot.setVisible(is_swept_ftims)
+
         self._axis_controls["selected"] = self._create_axis_controls(selected_layout, "selected")
 
         # FTIMS raw stepped-spectrum data tab
@@ -599,17 +623,23 @@ class MainWindow(QMainWindow):
         """Apply FTIMS/DTIMS visibility and labels after mode changes."""
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_ftims = str(mode_value).upper() == "FTIMS"
+        is_swept_ftims = str(mode_value).upper() == "SWEPT_FTIMS"
         is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
         if self.plot_tabs is not None and self.plot_tabs.count() > 4:
             self.plot_tabs.setTabVisible(3, is_ftims)
             self.plot_tabs.setTabVisible(4, is_vsims)
         if self.heat_plot is not None:
             self.heat_plot.setLabel("bottom", "Voltage (kV)" if is_vsims else "Iteration")
-            self.heat_plot.setTitle("Frequency Heatmap (FTIMS)" if is_ftims else ("Voltage Heatmap (VSIMS)" if is_vsims else "Iterations Heatmap (DTIMS)"))
+            self.heat_plot.setLabel("left", "Frequency (Hz)" if (is_ftims or is_swept_ftims) else "Time (ms)")
+            self.heat_plot.setTitle("Frequency Heatmap (FTIMS)" if is_ftims else ("Swept FTIMS FFT Heatmap" if is_swept_ftims else ("Voltage Heatmap (VSIMS)" if is_vsims else "Iterations Heatmap (DTIMS)")))
         if self.line_plot is not None:
-            self.line_plot.setTitle("FTIMS Mobility-Domain Spectrum" if is_ftims else ("VSIMS Trace" if is_vsims else "IMS Signal"))
+            self.line_plot.setTitle("FTIMS Mobility-Domain Spectrum" if is_ftims else ("Swept FTIMS Raw Signal" if is_swept_ftims else ("VSIMS Trace" if is_vsims else "IMS Signal")))
         if self.line_plot_from_heat is not None:
-            self.line_plot_from_heat.setTitle("Selected Frequency Spectrum (FTIMS)" if is_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else "IMS Signal (Selected from Heatmap)"))
+            self.line_plot_from_heat.setTitle("Selected Frequency Spectrum (FTIMS)" if is_ftims else ("Swept FTIMS Raw Signal (Selected Iteration)" if is_swept_ftims else ("VSIMS Signal (Selected Voltage)" if is_vsims else "IMS Signal (Selected from Heatmap)")))
+        if self.swept_fft_plot is not None:
+            self.swept_fft_plot.setVisible(is_swept_ftims)
+        if self.selected_swept_fft_plot is not None:
+            self.selected_swept_fft_plot.setVisible(is_swept_ftims)
         if self.voltage_spinbox is not None:
             self.voltage_spinbox.setVisible(not is_vsims)
         if self.voltage_label is not None:
@@ -914,7 +944,7 @@ class MainWindow(QMainWindow):
 
     def _update_ko(self) -> None:
         """Calculate and update the reduced mobility (Ko) value (DTIMS only)."""
-        if self.ko_label is None or self.config.operation_mode == OperationMode.FTIMS:
+        if self.ko_label is None or self.config.operation_mode in {OperationMode.FTIMS, OperationMode.SWEPT_FTIMS}:
             return
         
         drift_time_ms = self._current_cursor_x
@@ -1178,6 +1208,15 @@ class MainWindow(QMainWindow):
                 f"Step: {ftims_cfg.frequency_step_hz} Hz\n"
                 f"End freq: {ftims_cfg.end_frequency_hz} Hz\n"
                 f"Step time: {ftims_cfg.step_duration_seconds(cfg.averages_per_iteration):.3f} s\n"
+                f"Averages: {cfg.averages_per_iteration}\n"
+                f"Iterations: {cfg.total_iterations}"
+            )
+        elif cfg.operation_mode == OperationMode.SWEPT_FTIMS and cfg.swept_ftims_config is not None:
+            sft_cfg = cfg.swept_ftims_config
+            text = (
+                f"Initial frequency: {sft_cfg.initial_frequency_hz:.1f} Hz\n"
+                f"Final frequency: {sft_cfg.final_frequency_hz:.1f} Hz\n"
+                f"Sweep time: {sft_cfg.sweep_time_seconds:.3f} s\n"
                 f"Averages: {cfg.averages_per_iteration}\n"
                 f"Iterations: {cfg.total_iterations}"
             )
@@ -1489,13 +1528,21 @@ class MainWindow(QMainWindow):
     ) -> None:
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
+        is_spectral = str(mode_value).upper() in {"FTIMS", "SWEPT_FTIMS"}
         if x_iter is None or y_ms is None:
-            self.heat_cursor_label.setText("Heat cursor: x=-- (kV), y=-- ms" if is_vsims else "Heat cursor: x=-- (iter), y=-- ms")
+            if is_vsims:
+                self.heat_cursor_label.setText("Heat cursor: x=-- (kV), y=-- ms")
+            elif is_spectral:
+                self.heat_cursor_label.setText("Heat cursor: x=-- (iter), y=-- Hz")
+            else:
+                self.heat_cursor_label.setText("Heat cursor: x=-- (iter), y=-- ms")
             return
 
         lock_suffix = " [LOCKED]" if locked else ""
         if is_vsims:
             base_line = f"Heat cursor: x={x_iter:.4f} (kV), y={y_ms:.4f} ms{lock_suffix}"
+        elif is_spectral:
+            base_line = f"Heat cursor: x={x_iter:.3f} (iter), y={y_ms:.4f} Hz{lock_suffix}"
         else:
             base_line = f"Heat cursor: x={x_iter:.3f} (iter), y={y_ms:.4f} ms{lock_suffix}"
         if z_value is None:
@@ -1651,6 +1698,14 @@ class MainWindow(QMainWindow):
                 self._time_axis_cache = np.linspace(0.0, max_time_ms, point_count, endpoint=True)
             return self._time_axis_cache
 
+    def _swept_fft_max_hz(self) -> float:
+        cfg = self.config.swept_ftims_config
+        if cfg is None:
+            return float(max(1, self.config.data_points))
+        sweep_s = max(1e-9, float(cfg.sweep_time_seconds))
+        sample_rate = max(1e-9, float(self.config.data_points) / sweep_s)
+        return 0.5 * sample_rate
+
     def update_line_plot(self) -> None:
         if self.experiment_data.iteration_count() == 0:
             self.line_curve.setData([], [])
@@ -1678,11 +1733,22 @@ class MainWindow(QMainWindow):
         else:
             idx = max(0, self.iteration_selector.currentIndex())
             idx = min(idx, self.experiment_data.iteration_count() - 1)
-        y = self.experiment_data.get_iteration(idx)
-        x = self._time_axis(y.shape[0])
+        is_swept_ftims = self.config.operation_mode == OperationMode.SWEPT_FTIMS
+        if is_swept_ftims and (idx + 1) in self._swept_raw_iterations:
+            y = self._swept_raw_iterations[idx + 1]
+            x = np.linspace(0.0, float(self.config.experiment_length_ms), y.shape[0], endpoint=False)
+        else:
+            y = self.experiment_data.get_iteration(idx)
+            x = self._time_axis(y.shape[0])
         self._current_line_x = x
         self._current_line_y = y
         self.line_curve.setData(x, y)
+        if is_swept_ftims and self.swept_fft_curve is not None:
+            fft_y = self.experiment_data.get_iteration(idx)
+            fft_x = self._swept_fft_bins_hz.get(idx + 1)
+            if fft_x is None or fft_x.shape[0] != fft_y.shape[0]:
+                fft_x = np.arange(fft_y.shape[0], dtype=np.float64)
+            self.swept_fft_curve.setData(fft_x, fft_y)
         self._update_baseline_overlay("line")
         self._update_auto_axis("line")
 
@@ -1693,11 +1759,21 @@ class MainWindow(QMainWindow):
             return
 
         bounded_index = int(np.clip(iteration_index, 0, self.experiment_data.iteration_count() - 1))
-        y = self.experiment_data.get_iteration(bounded_index)
-        x = self._time_axis(y.shape[0])
+        if self.config.operation_mode == OperationMode.SWEPT_FTIMS and (bounded_index + 1) in self._swept_raw_iterations:
+            y = self._swept_raw_iterations[bounded_index + 1]
+            x = np.linspace(0.0, float(self.config.experiment_length_ms), y.shape[0], endpoint=False)
+        else:
+            y = self.experiment_data.get_iteration(bounded_index)
+            x = self._time_axis(y.shape[0])
         self._selected_line_x = x
         self._selected_line_y = y
         self.line_curve_from_heat.setData(x, y)
+        if self.config.operation_mode == OperationMode.SWEPT_FTIMS and self.selected_swept_fft_curve is not None:
+            fft_y = self.experiment_data.get_iteration(bounded_index)
+            fft_x = self._swept_fft_bins_hz.get(bounded_index + 1)
+            if fft_x is None or fft_x.shape[0] != fft_y.shape[0]:
+                fft_x = np.arange(fft_y.shape[0], dtype=np.float64)
+            self.selected_swept_fft_curve.setData(fft_x, fft_y)
         self._update_baseline_overlay("selected")
         self._update_auto_axis("selected")
         if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
@@ -1709,6 +1785,10 @@ class MainWindow(QMainWindow):
                 self.line_plot_from_heat.setTitle(
                     f"VSIMS Signal (Selected Voltage) - Index {bounded_index + 1}"
                 )
+        elif self.config.operation_mode == OperationMode.SWEPT_FTIMS:
+            self.line_plot_from_heat.setTitle(
+                f"Swept FTIMS Raw Signal (Selected Iteration) - Iteration {bounded_index + 1}"
+            )
         else:
             self.line_plot_from_heat.setTitle(
                 f"IMS Signal (Selected from Heatmap) - Iteration {bounded_index + 1}"
@@ -1754,7 +1834,9 @@ class MainWindow(QMainWindow):
         matrix_for_display = matrix[:, ::display_stride]
         self.heat_img.setImage(matrix_for_display.T, autoLevels=auto_levels, axisOrder="row-major")
 
-        if self.config.operation_mode == OperationMode.FTIMS:
+        if self.config.operation_mode == OperationMode.SWEPT_FTIMS:
+            max_time_ms = self._swept_fft_max_hz()
+        elif self.config.operation_mode == OperationMode.FTIMS:
             max_time_ms = float(point_count)
         else:
             max_time_ms = float(self.config.experiment_length_ms)
@@ -1851,7 +1933,12 @@ class MainWindow(QMainWindow):
             return
 
         mouse_point = self.heat_plot.vb.mapSceneToView(pos)
-        max_time_ms = float(self.config.experiment_length_ms)
+        if self.config.operation_mode == OperationMode.SWEPT_FTIMS:
+            max_time_ms = self._swept_fft_max_hz()
+        elif self.config.operation_mode == OperationMode.FTIMS:
+            max_time_ms = float(max(1, self.config.data_points))
+        else:
+            max_time_ms = float(self.config.experiment_length_ms)
         if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
             x_min = float(self.config.vsims_config.initial_voltage_kv)
             x_max = float(self.config.vsims_config.final_voltage_kv)
@@ -1866,8 +1953,9 @@ class MainWindow(QMainWindow):
         self.heat_cursor_v.setPos(x_val)
         self.heat_cursor_h.setPos(y_val)
 
-        point_idx = int(round((y_val / max_time_ms) * (self.config.data_points - 1))) if max_time_ms > 0 else 0
-        point_idx = int(np.clip(point_idx, 0, self.config.data_points - 1))
+        point_count = int(matrix.shape[1]) if matrix.ndim == 2 else int(self.config.data_points)
+        point_idx = int(round((y_val / max_time_ms) * (point_count - 1))) if max_time_ms > 0 else 0
+        point_idx = int(np.clip(point_idx, 0, point_count - 1))
         z_val = float(matrix[iter_idx, point_idx])
 
         self._set_heat_cursor_label(
@@ -1899,11 +1987,17 @@ class MainWindow(QMainWindow):
             selected_iter_idx = int(np.clip(round(float(mouse_point.x()) - 1.0), 0, self._heat_row_count - 1))
             x_val = float(np.clip(mouse_point.x(), 1.0, float(self._heat_row_count)))
 
-        max_time_ms = float(self.config.experiment_length_ms)
+        if self.config.operation_mode == OperationMode.SWEPT_FTIMS:
+            max_time_ms = self._swept_fft_max_hz()
+        elif self.config.operation_mode == OperationMode.FTIMS:
+            max_time_ms = float(max(1, self.config.data_points))
+        else:
+            max_time_ms = float(self.config.experiment_length_ms)
         y_val = float(np.clip(mouse_point.y(), 0.0, max_time_ms))
         iter_idx = selected_iter_idx
-        point_idx = int(round((y_val / max_time_ms) * (self.config.data_points - 1))) if max_time_ms > 0 else 0
-        point_idx = int(np.clip(point_idx, 0, self.config.data_points - 1))
+        point_count = int(self._heat_matrix.shape[1]) if self._heat_matrix.ndim == 2 else int(self.config.data_points)
+        point_idx = int(round((y_val / max_time_ms) * (point_count - 1))) if max_time_ms > 0 else 0
+        point_idx = int(np.clip(point_idx, 0, point_count - 1))
         z_val = float(self._heat_matrix[iter_idx, point_idx])
 
         if self._heat_cursor_locked:
@@ -2037,11 +2131,17 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "Already running", "Acquisition is already running.")
             return
-        if self.config.operation_mode == OperationMode.STEPPED_VSIMS and not self.hv_enabled:
+        requires_hv = self.config.operation_mode in {
+            OperationMode.DTIMS,
+            OperationMode.FTIMS,
+            OperationMode.SWEPT_FTIMS,
+            OperationMode.STEPPED_VSIMS,
+        }
+        if requires_hv and (not self.config.use_simulation) and not self.hv_enabled:
             QMessageBox.warning(
                 self,
                 "HV required",
-                "Stepped VSIMS requires HV ON before starting acquisition.\n"
+                f"{self.config.operation_mode.value} requires HV ON before starting acquisition.\n"
                 "Please turn on HV first.",
             )
             return
@@ -2054,8 +2154,14 @@ class MainWindow(QMainWindow):
         self._ftims_raw_time_domain_data.clear()
         self._vsims_voltage_points.clear()
         self._vsims_iteration_voltages.clear()
+        self._swept_raw_iterations.clear()
+        self._swept_fft_bins_hz.clear()
         if self.ftims_raw_curve is not None:
             self.ftims_raw_curve.setData([], [])
+        if self.swept_fft_curve is not None:
+            self.swept_fft_curve.setData([], [])
+        if self.selected_swept_fft_curve is not None:
+            self.selected_swept_fft_curve.setData([], [])
         if self.vsims_optimized_curve is not None:
             self.vsims_optimized_curve.setData([], [])
         self._apply_mode_ui_state()
@@ -2092,6 +2198,7 @@ class MainWindow(QMainWindow):
         )
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_ftims = str(mode_value).upper() == "FTIMS"
+        is_swept_ftims = str(mode_value).upper() == "SWEPT_FTIMS"
         is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
         has_frequency_info = current_frequency_hz is not None and float(current_frequency_hz) > 0.0
         has_frequency_count = total_frequencies is not None and int(total_frequencies) > 1
@@ -2100,7 +2207,7 @@ class MainWindow(QMainWindow):
             self.progress_label.setText(
                 f"Point: {iteration}/{total_iterations} | Voltage: {float(current_frequency_hz):.3f} kV | Average: {avg_count}/{avg_total}"
             )
-        elif is_ftims or has_frequency_info or has_frequency_count:
+        elif is_ftims or is_swept_ftims or has_frequency_info or has_frequency_count:
             # FTIMS mode: show frequency and average at that frequency
             self.progress_label.setText(
                 f"Iteration: {iteration}/{total_iterations} | Frequency: {float(current_frequency_hz or 0.0):.1f} Hz | Average: {avg_count}/{avg_total}"
@@ -2145,6 +2252,7 @@ class MainWindow(QMainWindow):
         
         mode_value = getattr(self.config.operation_mode, "value", self.config.operation_mode)
         is_ftims = str(mode_value).upper() == "FTIMS"
+        is_swept_ftims = str(mode_value).upper() == "SWEPT_FTIMS"
         is_vsims = str(mode_value).upper() == "STEPPED_VSIMS"
         if is_ftims:
             raw_points = metadata.get("raw_spectrum_points", {})
@@ -2157,6 +2265,22 @@ class MainWindow(QMainWindow):
                 self._update_ftims_raw_spectrum_plot()
                 if self.plot_tabs is not None:
                     self.plot_tabs.setTabVisible(3, True)
+
+        if is_swept_ftims:
+            raw_sweep = metadata.get("raw_time_domain_sweep", [])
+            fft_bins = metadata.get("fft_frequency_bins_hz", [])
+            try:
+                raw_arr = np.asarray(raw_sweep, dtype=np.float64)
+                if raw_arr.size > 0:
+                    self._swept_raw_iterations[int(iteration)] = raw_arr
+            except Exception:
+                pass
+            try:
+                bins_arr = np.asarray(fft_bins, dtype=np.float64)
+                if bins_arr.size > 0:
+                    self._swept_fft_bins_hz[int(iteration)] = bins_arr
+            except Exception:
+                pass
 
         if is_vsims:
             vs_voltage = metadata.get("vsims_voltage_kv")
@@ -2253,6 +2377,8 @@ class MainWindow(QMainWindow):
     def on_finished(self) -> None:
         self._append_iteration_selector(self.experiment_data.iteration_count(), refresh_plot=False)
         self.update_line_plot()
+        if self.experiment_data.iteration_count() > 0:
+            self._set_secondary_line_plot(self.experiment_data.iteration_count() - 1)
         self.update_heatmap()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -2298,6 +2424,8 @@ class MainWindow(QMainWindow):
         self.experiment_data = loaded
         self._selected_heat_iteration_index = None
         self._vsims_iteration_voltages.clear()
+        self._swept_raw_iterations.clear()
+        self._swept_fft_bins_hz.clear()
         if self.config.operation_mode == OperationMode.STEPPED_VSIMS and self.config.vsims_config is not None:
             steps = self.config.vsims_config.voltage_steps_kv()
             if steps:
