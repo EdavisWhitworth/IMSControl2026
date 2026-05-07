@@ -1,3 +1,5 @@
+"""Serializable experiment configuration and in-memory experiment results models."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
@@ -159,6 +161,7 @@ class SweptVSIMSConfig:
 
 @dataclass
 class ExperimentConfig:
+    """Top-level experiment settings shared by acquisition, UI, and persistence layers."""
     operation_mode: OperationMode = OperationMode.DTIMS
     # DTIMS parameters
     pulse_width_ms: float = 1.0
@@ -231,6 +234,7 @@ class ExperimentConfig:
 
 @dataclass
 class HVPowerConfig:
+    """Persisted hardware-output settings for IMS and ionization high-voltage control."""
     ims_ao_channel: str = "Dev1/ao0"
     ion_ao_channel: str = "Dev1/ao1"
     hv_enable_do_line: str = "Dev1/port0/line0"
@@ -275,6 +279,7 @@ class ExperimentData:
         self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
 
     def reset(self, config: ExperimentConfig | None = None) -> None:
+        """Clear all accumulated data and optionally replace the active configuration."""
         if config is not None:
             self.config = config
         self.created_at = datetime.now().isoformat(timespec="seconds")
@@ -286,6 +291,7 @@ class ExperimentData:
         self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
 
     def _ensure_capacity(self, required_rows: int) -> None:
+        """Grow the backing iteration matrix when more rows are needed."""
         if required_rows <= self._matrix.shape[0]:
             return
         new_rows = max(required_rows, self._matrix.shape[0] * 2)
@@ -296,6 +302,7 @@ class ExperimentData:
         self._matrix = new_matrix
 
     def _resize_point_count(self, point_count: int) -> None:
+        """Resize stored spectra when FTIMS determines a new point count on first use."""
         new_cols = max(1, int(point_count))
         current_rows = self.iteration_count()
         new_matrix = np.empty((max(1, self._matrix.shape[0]), new_cols), dtype=np.float64)
@@ -335,6 +342,7 @@ class ExperimentData:
                 self.frequency_bins = sorted(frequency_domain_data.keys())
 
     def get_iteration(self, index: int) -> np.ndarray:
+        """Return one stored processed iteration by zero-based index."""
         return self.iterations[index]
 
     def get_frequency_domain_iteration(self, index: int) -> Optional[Dict[float, np.ndarray]]:
@@ -344,9 +352,11 @@ class ExperimentData:
         return None
 
     def iteration_count(self) -> int:
+        """Return the number of completed iterations currently stored."""
         return len(self.iterations)
 
     def all_iterations_matrix(self) -> np.ndarray:
+        """Return a dense matrix view of all completed iterations."""
         count = self.iteration_count()
         if count == 0:
             return np.empty((0, self.config.data_points), dtype=np.float64)

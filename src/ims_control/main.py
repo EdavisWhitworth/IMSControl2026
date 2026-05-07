@@ -1,3 +1,5 @@
+"""Application entrypoint for the IMS control desktop UI."""
+
 from __future__ import annotations
 
 import logging
@@ -12,6 +14,7 @@ from ims_control.ui.main_window import MainWindow
 
 
 def _configure_crash_logging() -> None:
+    """Route uncaught exceptions to a persistent log file and stderr."""
     log_path = Path.home() / "ims_control_crash.log"
     logging.basicConfig(
         filename=str(log_path),
@@ -33,6 +36,7 @@ def _configure_crash_logging() -> None:
 
 
 def main() -> int:
+    """Create the Qt application, show the main window, and run the event loop."""
     _configure_crash_logging()
     app = QApplication(sys.argv)
     window = MainWindow()

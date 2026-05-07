@@ -1,3 +1,5 @@
+"""Subprocess entrypoint for data acquisition across all IMS operation modes."""
+
 from __future__ import annotations
 
 import argparse
@@ -14,6 +16,7 @@ from ims_control.hardware.daq_interface import DaqConfig, NiUSB6351Controller
 
 
 def _emit(payload: dict) -> None:
+    """Write one JSON event to stdout for the worker thread."""
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
 
@@ -82,6 +85,7 @@ def _ftims_transform_to_mobility(frequency_domain_data: dict) -> np.ndarray:
 
 
 def _load_hv_defaults() -> HVPowerConfig:
+    """Load persisted HV defaults, falling back to built-in defaults on error."""
     path = Path.home() / ".ims_control_hv_defaults.json"
     if not path.exists():
         return HVPowerConfig()
@@ -95,6 +99,7 @@ def _load_hv_defaults() -> HVPowerConfig:
 
 
 def _vsims_to_control_voltages(voltage_kv: float, hv_cfg: HVPowerConfig) -> tuple[float, float]:
+    """Convert requested VSIMS setpoints in kV into AO control voltages."""
     max_kv = max(1e-9, float(hv_cfg.ims_max_output_kv))
     ctrl_max_v = max(1e-9, float(hv_cfg.control_voltage_max_v))
 
@@ -107,6 +112,7 @@ def _vsims_to_control_voltages(voltage_kv: float, hv_cfg: HVPowerConfig) -> tupl
 
 
 def _build_swept_vsims_waveforms(payload: dict) -> dict[str, object]:
+    """Generate buffered IMS and ionization AO waveforms for Swept VSIMS mode."""
     data_points = max(1, int(payload.get("data_points", 4000)))
     experiment_length_s = max(1e-9, float(payload.get("experiment_length_ms", 50.0)) / 1000.0)
     pulse_width_s = max(1e-9, float(payload.get("pulse_width_ms", 0.2)) / 1000.0)
@@ -162,6 +168,7 @@ def _build_swept_vsims_waveforms(payload: dict) -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Execute one acquisition request and emit progress/results as JSON events."""
     parser = argparse.ArgumentParser(description="DAQ acquisition subprocess")
     parser.add_argument("--payload", required=True, help="JSON-encoded acquisition payload")
     args = parser.parse_args(argv)

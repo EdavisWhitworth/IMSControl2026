@@ -1,3 +1,5 @@
+"""Qt dialog for editing experiment settings across all supported operation modes."""
+
 from __future__ import annotations
 
 from PyQt5.QtWidgets import (
@@ -25,7 +27,9 @@ from ims_control.data_model.experiment import (
 
 
 class ExperimentConfigDialog(QDialog):
+    """Present and validate user-editable experiment configuration fields."""
     def __init__(self, config: ExperimentConfig, parent=None) -> None:
+        """Populate the dialog controls from an existing experiment configuration."""
         super().__init__(parent)
         self.setWindowTitle("Experiment Settings")
 

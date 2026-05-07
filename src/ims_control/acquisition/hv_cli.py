@@ -1,3 +1,5 @@
+"""Subprocess entrypoint for applying HV-related AO/DO outputs."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,11 +10,13 @@ from ims_control.hardware.daq_interface import DaqConfig, NiUSB6351Controller
 
 
 def _emit(payload: dict) -> None:
+    """Write one JSON event to stdout for the parent process."""
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse an HV payload, perform the hardware write, and report the result."""
     parser = argparse.ArgumentParser(description="HV output subprocess")
     parser.add_argument("--payload", required=True, help="JSON-encoded HV payload")
     args = parser.parse_args(argv)

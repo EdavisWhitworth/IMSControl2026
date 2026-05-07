@@ -1,3 +1,5 @@
+"""NI-DAQ-backed acquisition and output primitives used by IMS control modes."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,6 +24,7 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class DaqConfig:
+    """Common NI DAQ timing and channel configuration for one acquisition session."""
     ai_channel: str
     counter_channel: str
     pfi_trigger: str
@@ -36,6 +39,7 @@ class DaqConfig:
 
 
 class NiUSB6351Controller:
+    """Wrap NI-DAQmx task creation, simulation fallbacks, and mode-specific acquisitions."""
     def __init__(self, config: DaqConfig) -> None:
         self.config = config
         self._rng = np.random.default_rng()
@@ -55,6 +59,7 @@ class NiUSB6351Controller:
 
     @property
     def available(self) -> bool:
+        """Return whether real hardware access is available for this controller."""
         return nidaqmx is not None and not self.config.use_simulation
 
     @staticmethod
@@ -131,6 +136,7 @@ class NiUSB6351Controller:
         return f"/{device}/{ctr_name}InternalOutput"
 
     def open(self) -> None:
+        """Create the default AI/counter tasks used by non-buffered acquisition modes."""
         if not self.available:
             return
 
@@ -275,6 +281,7 @@ class NiUSB6351Controller:
             ) from e
 
     def close(self) -> None:
+        """Close all standard and Swept VSIMS cached tasks owned by the controller."""
         self.cleanup_swept_vsims_tasks()
         if self._ai_task is not None:
             try:
@@ -297,6 +304,7 @@ class NiUSB6351Controller:
         self._counter_writer = None
 
     def cleanup_swept_vsims_tasks(self) -> None:
+        """Stop and release the cached buffered tasks used by Swept VSIMS mode."""
         if self._swept_co_task is not None and self._swept_running:
             try:
                 self._swept_co_task.stop()
@@ -349,6 +357,7 @@ class NiUSB6351Controller:
         ion_waveform: np.ndarray,
         gate_pulse_delay_ms: float,
     ) -> None:
+        """Create and arm persistent buffered AO/AI/CO tasks for repeated Swept VSIMS pulses."""
         if nidaqmx is None:
             raise RuntimeError("nidaqmx is not available")
 
@@ -785,7 +794,7 @@ class NiUSB6351Controller:
         initial_ion_v: float,
         restore_after_scan: bool = False,
     ) -> np.ndarray:
-        """Acquire one swept VSIMS scan with synchronized AO and AI triggering."""
+        """Read one Swept VSIMS acquisition from the persistent retriggered task set."""
         samples_needed = max(1, int(self.config.data_points))
         ims_waveform = np.asarray(ims_waveform_v, dtype=np.float64).reshape(-1)
         ion_waveform = np.asarray(ion_waveform_v, dtype=np.float64).reshape(-1)

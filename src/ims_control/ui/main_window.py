@@ -1,3 +1,5 @@
+"""Primary Qt window for configuring, running, and visualizing IMS experiments."""
+
 from __future__ import annotations
 
 import json
@@ -38,10 +40,12 @@ from ims_control.ui.hv_config_dialog import HVConfigDialog
 
 
 class HVOutputWorker(QThread):
+    """Background worker that applies HV AO/DO outputs via the CLI subprocess."""
     applied = pyqtSignal(bool, float, float)
     failed = pyqtSignal(str)
 
     def __init__(self, payload: dict[str, object], timeout_seconds: float = 8.0) -> None:
+        """Store the subprocess payload and timeout for a single HV write request."""
         super().__init__()
         self.payload = payload
         self.timeout_seconds = float(timeout_seconds)
@@ -121,6 +125,7 @@ class HVOutputWorker(QThread):
 
 
 class MainWindow(QMainWindow):
+    """Main IMS control UI coordinating configuration, acquisition, plotting, and HV control."""
     DEFAULT_CONFIG_PATH = Path.home() / ".ims_control_defaults.json"
     DEFAULT_HV_CONFIG_PATH = Path.home() / ".ims_control_hv_defaults.json"
     DEFAULT_USER_PARAMS_PATH = Path.home() / ".ims_control_user_params_defaults.json"

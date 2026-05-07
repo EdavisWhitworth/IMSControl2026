@@ -1,3 +1,5 @@
+"""Qt worker thread that launches the DAQ subprocess and forwards events to the UI."""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +16,7 @@ from ims_control.data_model.experiment import ExperimentConfig
 
 
 class AcquisitionWorker(QThread):
+    """Run one acquisition job in a subprocess and translate JSON events into Qt signals."""
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, int, int, float, int)  # iteration, total_iterations, avg_count, avg_total, current_frequency_hz (or 0), total_frequencies
     ftims_raw_step = pyqtSignal(float, object)  # frequency_hz, np.ndarray signal
@@ -23,6 +26,7 @@ class AcquisitionWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, config: ExperimentConfig, user_params: dict | None = None) -> None:
+        """Store configuration and initialize worker-local debug state."""
         super().__init__()
         self.config = config
         self.user_params = user_params or {}
@@ -42,6 +46,7 @@ class AcquisitionWorker(QThread):
             pass
 
     def request_stop(self) -> None:
+        """Request cooperative cancellation and terminate the subprocess if needed."""
         self._stop_requested = True
         if self._proc is not None and self._proc.poll() is None:
             try:
@@ -50,6 +55,7 @@ class AcquisitionWorker(QThread):
                 pass
 
     def run(self) -> None:
+        """Build the acquisition payload, stream subprocess events, and emit UI updates."""
         src_dir = Path(__file__).resolve().parents[2]
         self._debug_events_written = 0
         self._debug_log(

@@ -1,3 +1,5 @@
+"""CSV and HDF5 persistence helpers for experiment results."""
+
 from __future__ import annotations
 
 import json
@@ -11,8 +13,10 @@ from ims_control.data_model.experiment import ExperimentConfig, ExperimentData
 
 
 class ExperimentExporter:
+    """Write experiment results and metadata to supported file formats."""
     @staticmethod
     def to_csv(file_path: str, experiment: ExperimentData) -> None:
+        """Export iterations to CSV plus a JSON sidecar containing metadata."""
         matrix = experiment.all_iterations_matrix()
         time_ms = np.linspace(
             0.0,
@@ -46,6 +50,7 @@ class ExperimentExporter:
 
     @staticmethod
     def to_hdf5(file_path: str, experiment: ExperimentData) -> None:
+        """Export experiment configuration and iterations to an HDF5 container."""
         with h5py.File(file_path, "w") as h5:
             h5.attrs["created_at"] = experiment.created_at
             cfg_group = h5.create_group("config")
@@ -64,8 +69,10 @@ class ExperimentExporter:
 
 
 class ExperimentImporter:
+    """Reconstruct experiment objects from persisted files."""
     @staticmethod
     def from_hdf5(file_path: str) -> ExperimentData:
+        """Load an experiment and its iteration history from HDF5."""
         with h5py.File(file_path, "r") as h5:
             cfg_group = h5["config"]
             raw_json = cfg_group.attrs.get("config_json")

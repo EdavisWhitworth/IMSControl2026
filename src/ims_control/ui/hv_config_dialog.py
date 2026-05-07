@@ -1,3 +1,5 @@
+"""Qt dialog for editing high-voltage output configuration and defaults."""
+
 from __future__ import annotations
 
 from PyQt5.QtWidgets import (
@@ -14,7 +16,9 @@ from ims_control.data_model.experiment import HVPowerConfig
 
 
 class HVConfigDialog(QDialog):
+    """Collect NI output channels and voltage-scaling settings for the HV stack."""
     def __init__(self, config: HVPowerConfig, parent=None) -> None:
+        """Populate the dialog controls from the persisted HV configuration."""
         super().__init__(parent)
         self.setWindowTitle("HV Parameters")
 
@@ -69,6 +73,7 @@ class HVConfigDialog(QDialog):
         layout.addWidget(buttons)
 
     def to_config(self) -> HVPowerConfig:
+        """Build an `HVPowerConfig` from the current dialog state."""
         return HVPowerConfig(
             ims_ao_channel=self.ims_ao_channel.text().strip() or "Dev1/ao0",
             ion_ao_channel=self.ion_ao_channel.text().strip() or "Dev1/ao1",
@@ -81,4 +86,5 @@ class HVConfigDialog(QDialog):
         )
 
     def should_save_as_default(self) -> bool:
+        """Return whether the user requested that these settings become defaults."""
         return self.save_defaults.isChecked()
