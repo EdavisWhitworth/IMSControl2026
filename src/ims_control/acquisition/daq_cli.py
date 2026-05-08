@@ -59,29 +59,41 @@ def _extract_peak_metrics(spectrum: np.ndarray) -> dict:
         }
 
 
-def _ftims_transform_to_mobility(frequency_domain_data: dict) -> np.ndarray:
+def _ftims_transform_to_mobility(
+    frequency_domain_data: dict,
+    start_frequency_hz: float,
+    frequency_step_hz: float,
+    averages_per_iteration: int,
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Transform frequency-domain data to mobility-domain using FFT.
-    
-    Applies FFT independently to each frequency's time-domain signal,
-    then averages the resulting mobility-domain spectra across frequencies.
-    
-    Args:
-        frequency_domain_data: Dict mapping frequency (Hz) → time-domain signal at that frequency
-        
+    Transform stepped-FTIMS raw spectrum to mobility-domain amplitude.
+
     Returns:
-        FFT-transformed and averaged spectrum as np.ndarray
+        Tuple of (FFT amplitude spectrum, ATD-time axis in ms)
     """
-    # Sort frequencies
     frequencies = sorted(frequency_domain_data.keys())
-    
-    # Build a stepped-frequency raw spectrum (one scalar per frequency),
-    # then FFT that spectrum.
     raw_spectrum = np.asarray([float(np.mean(np.asarray(frequency_domain_data[f]))) for f in frequencies], dtype=np.float64)
-    fft_result = np.fft.fft(raw_spectrum)
-    result = np.abs(fft_result)
-    
-    return result
+    n_pts = int(raw_spectrum.size)
+    if n_pts <= 0:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+
+    start_hz = max(1e-9, float(start_frequency_hz))
+    step_hz = max(1e-9, float(frequency_step_hz))
+    avg_count = max(1, int(averages_per_iteration))
+
+    # Match attached FTIMS script conventions for display and axis mapping.
+    time_step_s = (1.0 / start_hz) + 0.05
+    sweep_rate_hz_per_s = step_hz / (0.05 + (avg_count / start_hz))
+
+    norm_fac = 2.0 / float(n_pts)
+    n_half = max(1, int(n_pts / 2))
+    yf = np.fft.fft(raw_spectrum)
+    amplitude = (np.abs(yf[:n_half]) * norm_fac) ** 2
+    xf = np.fft.fftfreq(n_pts, d=time_step_s)
+    freq_axis = xf[:n_half]
+    atd_time_ms = (freq_axis / max(1e-9, sweep_rate_hz_per_s)) * 1000.0
+
+    return amplitude, atd_time_ms
 
 
 def _load_hv_defaults() -> HVPowerConfig:
@@ -269,7 +281,12 @@ def main(argv: list[str] | None = None) -> int:
                     freq_domain_acc[freq] /= float(averages_per_iteration)
 
                 # Transform to mobility domain using FFT
-                mobility_spectrum = _ftims_transform_to_mobility(freq_domain_acc)
+                mobility_spectrum, atd_time_ms = _ftims_transform_to_mobility(
+                    freq_domain_acc,
+                    start_frequency_hz=start_freq,
+                    frequency_step_hz=freq_step,
+                    averages_per_iteration=averages_per_iteration,
+                )
 
                 if positive_mode:
                     mobility_spectrum = -mobility_spectrum
@@ -288,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
                         "frequency_domain_data": {
                             str(f): sig.tolist() for f, sig in freq_domain_acc.items()
                         },
+                        "ftims_atd_time_ms": atd_time_ms.tolist(),
                         "peak_metrics": peak_metrics,
                     }
                 )

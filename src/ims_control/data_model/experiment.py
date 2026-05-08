@@ -273,6 +273,9 @@ class ExperimentData:
         # For FTIMS mode: store frequency-domain data and FFT-transformed mobility data
         self.frequency_domain_iterations: List[Dict[float, np.ndarray]] = []
         self.frequency_bins: List[float] = []
+        self.ftims_raw_spectrum_iterations: List[Dict[float, float]] = []
+        self.swept_raw_time_domain_iterations: List[np.ndarray] = []
+        self.swept_fft_frequency_bins_iterations: List[np.ndarray] = []
         
         # Matrix dimensions depend on mode, but FTIMS can renegotiate point count
         # at first iteration to match stepped-spectrum FFT length.
@@ -287,6 +290,9 @@ class ExperimentData:
         self.iteration_timestamps.clear()
         self.frequency_domain_iterations.clear()
         self.frequency_bins.clear()
+        self.ftims_raw_spectrum_iterations.clear()
+        self.swept_raw_time_domain_iterations.clear()
+        self.swept_fft_frequency_bins_iterations.clear()
         
         self._matrix = np.empty((max(1, config.total_iterations), config.data_points), dtype=np.float64)
 
@@ -350,6 +356,21 @@ class ExperimentData:
         if 0 <= index < len(self.frequency_domain_iterations):
             return self.frequency_domain_iterations[index]
         return None
+
+    def add_ftims_raw_spectrum_iteration(self, raw_points: Dict[float, float]) -> None:
+        """Store one FTIMS stepped raw spectrum (frequency -> point value)."""
+        normalized: Dict[float, float] = {}
+        for frequency_hz, point_value in raw_points.items():
+            try:
+                normalized[float(frequency_hz)] = float(point_value)
+            except Exception:
+                continue
+        self.ftims_raw_spectrum_iterations.append(normalized)
+
+    def add_swept_ftims_iteration(self, raw_time_domain: np.ndarray, fft_frequency_bins_hz: np.ndarray) -> None:
+        """Store one swept FTIMS raw time-domain trace and its FFT frequency bins."""
+        self.swept_raw_time_domain_iterations.append(np.asarray(raw_time_domain, dtype=np.float64))
+        self.swept_fft_frequency_bins_iterations.append(np.asarray(fft_frequency_bins_hz, dtype=np.float64))
 
     def iteration_count(self) -> int:
         """Return the number of completed iterations currently stored."""

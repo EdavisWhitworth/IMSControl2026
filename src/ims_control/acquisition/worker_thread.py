@@ -185,8 +185,11 @@ class AcquisitionWorker(QThread):
                     # Extract FTIMS-specific metadata if available
                     metadata = {
                         "raw_time_domain_data": event.get("raw_time_domain_data", {}),
+                        "raw_time_domain_sweep": event.get("raw_time_domain_sweep", []),
                         "raw_spectrum_points": event.get("raw_spectrum_points", {}),
                         "frequency_domain_data": event.get("frequency_domain_data", {}),
+                        "fft_frequency_bins_hz": event.get("fft_frequency_bins_hz", []),
+                        "ftims_atd_time_ms": event.get("ftims_atd_time_ms", []),
                         "peak_metrics": event.get("peak_metrics", {}),
                         "vsims_voltage_kv": event.get("vsims_voltage_kv"),
                         "vsims_sweep_iteration": event.get("vsims_sweep_iteration"),
