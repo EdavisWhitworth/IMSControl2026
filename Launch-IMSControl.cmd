@@ -18,14 +18,20 @@ if not exist "%PYTHON_EXE%" (
 )
 
 pushd "%SCRIPT_DIR%"
+echo [INFO] Starting IMS Control...
+echo [INFO] Python executable: %PYTHON_EXE%
+echo [INFO] PYTHONPATH: %PYTHONPATH%
 "%PYTHON_EXE%" -m ims_control.main
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 
 if not "%EXIT_CODE%"=="0" (
     echo.
-    echo IMS Control exited with code %EXIT_CODE%.
+    echo [ERROR] IMS Control exited with code %EXIT_CODE%.
+    echo Press any key to close this window...
     pause
+) else (
+    echo [INFO] IMS Control closed normally.
 )
 
 exit /b %EXIT_CODE%

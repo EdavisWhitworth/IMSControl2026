@@ -189,6 +189,7 @@ class MainWindow(QMainWindow):
         self.hv_state_readout_label: QLabel | None = None
         self.hv_ims_readout_label: QLabel | None = None
         self.hv_ion_readout_label: QLabel | None = None
+        self.btn_subtract_baseline: QPushButton | None = None
         self.hv_ims_kv_readout_label: QLabel | None = None
         self.hv_ion_kv_readout_label: QLabel | None = None
         self.hardware_params_label: QLabel | None = None
@@ -226,6 +227,12 @@ class MainWindow(QMainWindow):
         self._selected_peak_region: pg.LinearRegionItem | None = None
         self._selected_fwhm_left: pg.InfiniteLine | None = None
         self._selected_fwhm_right: pg.InfiniteLine | None = None
+        self._vsims_opt_baseline_curve: Any | None = None
+        self._vsims_opt_peak_region: pg.LinearRegionItem | None = None
+        self._vsims_opt_fwhm_left: pg.InfiniteLine | None = None
+        self._vsims_opt_fwhm_right: pg.InfiniteLine | None = None
+        self._baseline_subtracted_rows: list[np.ndarray] = []
+        self._baseline_subtraction_cache_bounds: tuple[float, float] | None = None
 
         self._build_ui()
         self._refresh_config_label()
@@ -432,6 +439,10 @@ class MainWindow(QMainWindow):
         self.follow_latest_checkbox = QCheckBox("Follow latest")
         self.follow_latest_checkbox.setChecked(True)
         chooser.addWidget(self.follow_latest_checkbox)
+        self.btn_subtract_baseline = QPushButton("Subtract baseline")
+        self.btn_subtract_baseline.setCheckable(True)
+        self.btn_subtract_baseline.setToolTip("Subtract the average baseline from line plots and heatmap selections")
+        chooser.addWidget(self.btn_subtract_baseline)
         chooser.addStretch()
         line_layout.addLayout(chooser)
 
@@ -566,10 +577,22 @@ class MainWindow(QMainWindow):
         self.vsims_optimized_curve = self.vsims_optimized_plot.plot(
             pen=pg.mkPen("m", width=2),
         )
+        self._vsims_opt_baseline_curve = self.vsims_optimized_plot.plot(pen=pg.mkPen("r", width=3))
         self.vsims_opt_cursor_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y", width=1))
         self.vsims_opt_cursor_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("y", width=1))
         self.vsims_optimized_plot.addItem(self.vsims_opt_cursor_v, ignoreBounds=True)
         self.vsims_optimized_plot.addItem(self.vsims_opt_cursor_h, ignoreBounds=True)
+        self._vsims_opt_peak_region = pg.LinearRegionItem(values=(0.0, 0.0), orientation="vertical")
+        self._vsims_opt_peak_region.setBrush(pg.mkBrush(0, 255, 0, 40))
+        self._vsims_opt_peak_region.setMovable(False)
+        self._vsims_opt_fwhm_left = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("c", width=1))
+        self._vsims_opt_fwhm_right = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("c", width=1))
+        self.vsims_optimized_plot.addItem(self._vsims_opt_peak_region, ignoreBounds=True)
+        self.vsims_optimized_plot.addItem(self._vsims_opt_fwhm_left, ignoreBounds=True)
+        self.vsims_optimized_plot.addItem(self._vsims_opt_fwhm_right, ignoreBounds=True)
+        self._vsims_opt_peak_region.hide()
+        self._vsims_opt_fwhm_left.hide()
+        self._vsims_opt_fwhm_right.hide()
         vsims_opt_layout.addWidget(self.vsims_optimized_plot)
         self._axis_controls["vsims_opt"] = self._create_axis_controls(vsims_opt_layout, "vsims_opt")
         plot_tabs.addTab(vsims_opt_tab, "VSIMS Optimized")
@@ -595,6 +618,8 @@ class MainWindow(QMainWindow):
         self.btn_load_h5.clicked.connect(self.load_hdf5)
         self.iteration_selector.currentIndexChanged.connect(self._on_iteration_selector_changed)
         self.follow_latest_checkbox.toggled.connect(self.update_line_plot)
+        if self.btn_subtract_baseline is not None:
+            self.btn_subtract_baseline.toggled.connect(self._on_baseline_subtraction_toggled)
         self.pressure_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.temperature_spinbox.valueChanged.connect(self._on_parameter_changed)
         self.length_spinbox.valueChanged.connect(self._on_parameter_changed)
@@ -667,6 +692,8 @@ class MainWindow(QMainWindow):
             self.voltage_label.setVisible(not is_vsims and not is_swept_vsims)
         if self.btn_hv_settings is not None:
             self.btn_hv_settings.setVisible(not is_vsims and not is_swept_vsims)
+        if self.btn_subtract_baseline is not None:
+            self.btn_subtract_baseline.setEnabled(not is_swept_vsims)
         self._update_vsims_heat_overlay()
 
     def _refresh_hv_control_states(self) -> None:
@@ -1035,12 +1062,25 @@ class MainWindow(QMainWindow):
             self._selected_peak_region.hide()
             self._selected_fwhm_left.hide()
             self._selected_fwhm_right.hide()
+        if source in (None, "vsims_opt"):
+            if self._vsims_opt_peak_region is not None:
+                self._vsims_opt_peak_region.hide()
+            if self._vsims_opt_fwhm_left is not None:
+                self._vsims_opt_fwhm_left.hide()
+            if self._vsims_opt_fwhm_right is not None:
+                self._vsims_opt_fwhm_right.hide()
 
     def _on_parameter_changed(self, _value: float | None = None) -> None:
         self._update_baseline_overlay("line")
         self._update_baseline_overlay("selected")
         self._update_vsims_optimized_plot()
         self._update_vsims_heat_overlay()
+        if self._baseline_subtraction_enabled():
+            cache_state = (self._baseline_subtraction_cache_bounds, len(self._baseline_subtracted_rows))
+            self._ensure_baseline_cache()
+            if cache_state != (self._baseline_subtraction_cache_bounds, len(self._baseline_subtracted_rows)):
+                self._refresh_baseline_views()
+                return
         if self._active_cursor_locked():
             self._update_ko()
             if self._line_cursor_locked:
@@ -1059,6 +1099,14 @@ class MainWindow(QMainWindow):
                     self._current_cursor_x,
                     "vsims_opt",
                 )
+
+    def _on_baseline_subtraction_toggled(self, checked: bool) -> None:
+        del checked
+        if self._baseline_subtraction_enabled():
+            self._rebuild_baseline_cache()
+        else:
+            self._clear_baseline_cache()
+        self._refresh_baseline_views()
 
     def _active_iteration_index_for_ko(self) -> int | None:
         count = self.experiment_data.iteration_count()
@@ -1222,15 +1270,116 @@ class MainWindow(QMainWindow):
         del source
         return self._safe_bounds(self.noise_start_spinbox.value(), self.noise_end_spinbox.value())
 
+    def _baseline_subtraction_enabled(self) -> bool:
+        return bool(self.btn_subtract_baseline is not None and self.btn_subtract_baseline.isChecked() and self.config.operation_mode != OperationMode.SWEPT_VSIMS)
+
+    def _clear_baseline_cache(self) -> None:
+        self._baseline_subtracted_rows.clear()
+        self._baseline_subtraction_cache_bounds = None
+
+    def _line_x_for_iteration(self, iteration_index: int, point_count: int) -> np.ndarray:
+        if self.config.operation_mode == OperationMode.FTIMS:
+            key = iteration_index + 1
+            x = self._ftims_atd_time_bins_ms.get(key)
+            if x is not None and x.shape[0] == point_count:
+                return x
+            return self._time_axis(point_count)
+        if self.config.operation_mode == OperationMode.SWEPT_FTIMS:
+            return np.linspace(0.0, float(self.config.experiment_length_ms), point_count, endpoint=False)
+        return self._time_axis(point_count)
+
+    def _subtract_baseline_row(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        low_bound, high_bound = self._baseline_bounds("line")
+        if x.size == 0 or y.size == 0:
+            return np.asarray(y, dtype=np.float64).copy()
+        baseline_mask = (x >= low_bound) & (x <= high_bound)
+        y_arr = np.asarray(y, dtype=np.float64)
+        if not np.any(baseline_mask):
+            return y_arr.copy()
+        baseline_mean = float(np.mean(y_arr[baseline_mask]))
+        return y_arr - baseline_mean
+
+    def _rebuild_baseline_cache(self) -> None:
+        if not self._baseline_subtraction_enabled():
+            self._clear_baseline_cache()
+            return
+
+        bounds = self._baseline_bounds("line")
+        rows: list[np.ndarray] = []
+        for iteration_index in range(self.experiment_data.iteration_count()):
+            y = np.asarray(self.experiment_data.get_iteration(iteration_index), dtype=np.float64)
+            x = self._line_x_for_iteration(iteration_index, y.shape[0])
+            rows.append(self._subtract_baseline_row(x, y))
+
+        self._baseline_subtracted_rows = rows
+        self._baseline_subtraction_cache_bounds = bounds
+
+    def _ensure_baseline_cache(self) -> None:
+        if not self._baseline_subtraction_enabled():
+            self._clear_baseline_cache()
+            return
+
+        bounds = self._baseline_bounds("line")
+        if self._baseline_subtraction_cache_bounds != bounds or len(self._baseline_subtracted_rows) != self.experiment_data.iteration_count():
+            self._rebuild_baseline_cache()
+
+    def _append_baseline_cache_for_iteration(self, iteration_index: int, y: np.ndarray) -> None:
+        if not self._baseline_subtraction_enabled():
+            return
+
+        bounds = self._baseline_bounds("line")
+        if self._baseline_subtraction_cache_bounds != bounds or len(self._baseline_subtracted_rows) != iteration_index:
+            self._rebuild_baseline_cache()
+            return
+
+        x = self._line_x_for_iteration(iteration_index, y.shape[0])
+        self._baseline_subtracted_rows.append(self._subtract_baseline_row(x, y))
+        self._baseline_subtraction_cache_bounds = bounds
+
+    def _display_row_for_iteration(self, iteration_index: int, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        if not self._baseline_subtraction_enabled():
+            return np.asarray(y, dtype=np.float64)
+
+        self._ensure_baseline_cache()
+        if 0 <= iteration_index < len(self._baseline_subtracted_rows):
+            return self._baseline_subtracted_rows[iteration_index]
+        return self._subtract_baseline_row(x, y)
+
+    def _display_matrix(self) -> np.ndarray:
+        matrix = self.experiment_data.all_iterations_matrix()
+        if not self._baseline_subtraction_enabled():
+            return matrix
+
+        self._ensure_baseline_cache()
+        if len(self._baseline_subtracted_rows) != self.experiment_data.iteration_count():
+            return matrix
+        if not self._baseline_subtracted_rows:
+            return np.empty((0, matrix.shape[1] if matrix.ndim == 2 else self.config.data_points), dtype=np.float64)
+        return np.asarray(self._baseline_subtracted_rows, dtype=np.float64)
+
+    def _refresh_baseline_views(self) -> None:
+        self.update_line_plot()
+        if self._selected_heat_iteration_index is not None:
+            self._set_secondary_line_plot(self._selected_heat_iteration_index)
+        self.update_heatmap(force_levels=True)
+        if self.config.operation_mode == OperationMode.STEPPED_VSIMS:
+            self._update_vsims_optimized_plot()
+
     def _update_baseline_overlay(self, source: str) -> None:
         if source == "line":
             x_values = self._current_line_x
             y_values = self._current_line_y
             baseline_curve = self.line_baseline_curve
-        else:
+        elif source == "selected":
             x_values = self._selected_line_x
             y_values = self._selected_line_y
             baseline_curve = self.selected_baseline_curve
+        elif source == "vsims_opt":
+            x_values = self._vsims_opt_line_x
+            y_values = self._vsims_opt_line_y
+            baseline_curve = self._vsims_opt_baseline_curve
+        else:
+            return
 
         if baseline_curve is None or x_values.size == 0 or y_values.size == 0:
             if baseline_curve is not None:
@@ -1350,6 +1499,15 @@ class MainWindow(QMainWindow):
             self._selected_peak_region.show()
             self._selected_fwhm_left.show()
             self._selected_fwhm_right.show()
+        elif source == "vsims_opt" and self._vsims_opt_peak_region is not None:
+            self._vsims_opt_peak_region.setRegion((float(x[left_idx]), float(x[right_idx])))
+            if self._vsims_opt_fwhm_left is not None:
+                self._vsims_opt_fwhm_left.setPos(left_x)
+                self._vsims_opt_fwhm_left.show()
+            if self._vsims_opt_fwhm_right is not None:
+                self._vsims_opt_fwhm_right.setPos(right_x)
+                self._vsims_opt_fwhm_right.show()
+            self._vsims_opt_peak_region.show()
 
     def _refresh_config_label(self) -> None:
         cfg = self.config
@@ -1933,9 +2091,10 @@ class MainWindow(QMainWindow):
         else:
             y = self.experiment_data.get_iteration(idx)
             x = self._time_axis(y.shape[0])
+        display_y = self._display_row_for_iteration(idx, x, y)
         self._current_line_x = x
-        self._current_line_y = y
-        self.line_curve.setData(x, y)
+        self._current_line_y = display_y
+        self.line_curve.setData(x, display_y)
         if is_swept_ftims and self.swept_fft_curve is not None:
             fft_y = self.experiment_data.get_iteration(idx)
             fft_x = self._swept_fft_bins_hz.get(idx + 1)
@@ -1963,9 +2122,10 @@ class MainWindow(QMainWindow):
         else:
             y = self.experiment_data.get_iteration(bounded_index)
             x = self._time_axis(y.shape[0])
+        display_y = self._display_row_for_iteration(bounded_index, x, y)
         self._selected_line_x = x
-        self._selected_line_y = y
-        self.line_curve_from_heat.setData(x, y)
+        self._selected_line_y = display_y
+        self.line_curve_from_heat.setData(x, display_y)
         if self.config.operation_mode == OperationMode.SWEPT_FTIMS and self.selected_swept_fft_curve is not None:
             fft_y = self.experiment_data.get_iteration(bounded_index)
             fft_x = self._swept_fft_bins_hz.get(bounded_index + 1)
@@ -2008,7 +2168,7 @@ class MainWindow(QMainWindow):
         self._set_secondary_line_plot(pending_index)
 
     def update_heatmap(self, force_levels: bool = False) -> None:
-        matrix = self.experiment_data.all_iterations_matrix()
+        matrix = self._display_matrix()
         self._heat_matrix = matrix
         self._heat_row_count = matrix.shape[0] if matrix.ndim == 2 else 0
         if matrix.size == 0:
@@ -2347,6 +2507,7 @@ class MainWindow(QMainWindow):
             self._selected_heat_iteration_index = None
             self._ftims_atd_time_bins_ms.clear()
             self._vsims_iteration_voltages.clear()
+            self._clear_baseline_cache()
             self._refresh_config_label()
             self._apply_mode_ui_state()
             self._refresh_iteration_selector()
@@ -2418,6 +2579,7 @@ class MainWindow(QMainWindow):
         self._ftims_atd_time_bins_ms.clear()
         self._swept_raw_iterations.clear()
         self._swept_fft_bins_hz.clear()
+        self._clear_baseline_cache()
         if self.ftims_raw_curve is not None:
             self.ftims_raw_curve.setData([], [])
         if self.swept_fft_curve is not None:
@@ -2542,6 +2704,10 @@ class MainWindow(QMainWindow):
                 if self.plot_tabs is not None:
                     self.plot_tabs.setTabVisible(3, True)
 
+        if self._baseline_subtraction_enabled():
+            cache_iteration_index = self.experiment_data.iteration_count() - 1
+            self._append_baseline_cache_for_iteration(cache_iteration_index, np.asarray(y, dtype=np.float64))
+
         if is_swept_ftims:
             raw_sweep = metadata.get("raw_time_domain_sweep", [])
             fft_bins = metadata.get("fft_frequency_bins_hz", [])
@@ -2609,8 +2775,13 @@ class MainWindow(QMainWindow):
         elif should_refresh_heatmap:
             self.update_line_plot()
 
-        y_min = float(np.min(y))
-        y_max = float(np.max(y))
+        display_row = self._display_row_for_iteration(
+            self.experiment_data.iteration_count() - 1,
+            self._line_x_for_iteration(self.experiment_data.iteration_count() - 1, int(np.asarray(y, dtype=np.float64).shape[0])),
+            np.asarray(y, dtype=np.float64),
+        )
+        y_min = float(np.min(display_row))
+        y_max = float(np.max(display_row))
         if self._heat_z_min is None or y_min < self._heat_z_min:
             self._heat_z_min = y_min
         if self._heat_z_max is None or y_max > self._heat_z_max:
@@ -2655,6 +2826,9 @@ class MainWindow(QMainWindow):
             self._vsims_opt_selected_voltage_kv = None
             self._vsims_opt_cursor_locked = False
             self.vsims_optimized_curve.setData([], [])
+            if self._vsims_opt_baseline_curve is not None:
+                self._vsims_opt_baseline_curve.setData([], [])
+            self._hide_peak_overlays("vsims_opt")
             return
 
         x_vals: list[float] = []
@@ -2674,6 +2848,7 @@ class MainWindow(QMainWindow):
         self._vsims_opt_line_y = y
         self._vsims_opt_line_voltage_kv = v
         self.vsims_optimized_curve.setData(x, y)
+        self._update_baseline_overlay("vsims_opt")
 
         if self._vsims_opt_cursor_locked and self._vsims_opt_selected_voltage_kv is not None and x.size > 0:
             idx = int(np.argmin(np.abs(v - float(self._vsims_opt_selected_voltage_kv))))
@@ -2711,7 +2886,7 @@ class MainWindow(QMainWindow):
         if self.config.operation_mode != OperationMode.STEPPED_VSIMS:
             return
 
-        matrix = self.experiment_data.all_iterations_matrix()
+        matrix = self._display_matrix()
         row_count = matrix.shape[0] if matrix.ndim == 2 else 0
         if row_count == 0:
             return
@@ -2793,6 +2968,7 @@ class MainWindow(QMainWindow):
         self._ftims_atd_time_bins_ms.clear()
         self._swept_raw_iterations.clear()
         self._swept_fft_bins_hz.clear()
+        self._clear_baseline_cache()
         if self.config.operation_mode == OperationMode.FTIMS:
             if self.experiment_data.ftims_raw_spectrum_iterations:
                 self._ftims_raw_time_domain_data = dict(self.experiment_data.ftims_raw_spectrum_iterations[-1])
