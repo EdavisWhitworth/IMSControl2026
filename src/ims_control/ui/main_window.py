@@ -1565,7 +1565,7 @@ class MainWindow(QMainWindow):
             f"AI: {cfg.ai_channel}\n"
             f"Counter: {cfg.counter_channel}\n"
             f"PFI trigger: {cfg.pfi_trigger}\n"
-            f"Polarity: {'Positive' if cfg.positive_mode else 'Negative'}\n"
+            f"Polarity: {'N/A' if cfg.operation_mode in {OperationMode.FTIMS, OperationMode.SWEPT_FTIMS} else ('Positive' if cfg.positive_mode else 'Negative')}\n"
             f"Acquisition mode: {'Simulation' if cfg.use_simulation else 'Hardware'}"
         )
         if self.hardware_params_label is not None:

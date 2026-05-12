@@ -79,6 +79,7 @@ class ExperimentConfigDialog(QDialog):
         self.counter_channel = QLineEdit(config.counter_channel)
         self.pfi_trigger = QLineEdit(config.pfi_trigger)
 
+        self.polarity_label = QLabel("Polarity mode")
         self.polarity_mode = QComboBox()
         self.polarity_mode.addItems(["Negative", "Positive"])
         self.polarity_mode.setCurrentText("Positive" if config.positive_mode else "Negative")
@@ -248,7 +249,7 @@ class ExperimentConfigDialog(QDialog):
         form.addRow("AI channel", self.ai_channel)
         form.addRow("Counter channel", self.counter_channel)
         form.addRow("PFI trigger", self.pfi_trigger)
-        form.addRow("Polarity mode", self.polarity_mode)
+        form.addRow(self.polarity_label, self.polarity_mode)
         form.addRow("Mode", self.simulation)
         form.addRow("Defaults", self.save_defaults)
 
@@ -283,6 +284,9 @@ class ExperimentConfigDialog(QDialog):
         is_swept_ftims = mode == "Swept FTIMS"
         is_vsims = mode == "Stepped VSIMS"
         is_swept_vsims = mode == "Swept VSIMS"
+        polarity_visible = not (is_ftims or is_swept_ftims)
+        self.polarity_label.setVisible(polarity_visible)
+        self.polarity_mode.setVisible(polarity_visible)
         if (is_vsims or is_swept_vsims) and self._last_mode_text not in {"Stepped VSIMS", "Swept VSIMS"}:
             self.pulse_width_ms.setValue(0.2)
             self.experiment_length_ms.setValue(50.0)
@@ -395,7 +399,7 @@ class ExperimentConfigDialog(QDialog):
             ai_channel=self.ai_channel.text().strip() or "Dev1/ai0",
             counter_channel=self.counter_channel.text().strip() or "Dev1/ctr0",
             pfi_trigger=self.pfi_trigger.text().strip() or "Dev1/PFI0",
-            positive_mode=self.polarity_mode.currentText() == "Positive",
+            positive_mode=(self.polarity_mode.currentText() == "Positive") if mode not in {OperationMode.FTIMS, OperationMode.SWEPT_FTIMS} else False,
             use_simulation=self.simulation.isChecked(),
             ftims_config=ftims_config,
             swept_ftims_config=swept_ftims_config,

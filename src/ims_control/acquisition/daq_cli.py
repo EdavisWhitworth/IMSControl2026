@@ -288,9 +288,6 @@ def main(argv: list[str] | None = None) -> int:
                     averages_per_iteration=averages_per_iteration,
                 )
 
-                if positive_mode:
-                    mobility_spectrum = -mobility_spectrum
-
                 # Extract peak metrics for display
                 peak_metrics = _extract_peak_metrics(mobility_spectrum)
 
@@ -450,8 +447,6 @@ def main(argv: list[str] | None = None) -> int:
                         continue
 
                     averaged = acc / float(averages_per_iteration)
-                    if positive_mode:
-                        averaged = -averaged
 
                     raw_point = float(np.mean(averaged))
                     raw_spectrum_points[voltage_kv] = raw_point
