@@ -38,17 +38,14 @@ class ExperimentConfigDialog(QDialog):
 
         # Mode selection
         self.operation_mode = QComboBox()
-        self.operation_mode.addItems(["DTIMS", "Stepped FTIMS", "Swept FTIMS", "Stepped VSIMS", "Swept VSIMS"])
+        self.operation_mode.addItems(["DTIMS", "Stepped FTIMS", "Stepped VSIMS"])
         if config.operation_mode == OperationMode.STEPPED_VSIMS:
             self.operation_mode.setCurrentText("Stepped VSIMS")
-        elif config.operation_mode == OperationMode.SWEPT_VSIMS:
-            self.operation_mode.setCurrentText("Swept VSIMS")
-        elif config.operation_mode == OperationMode.SWEPT_FTIMS:
-            self.operation_mode.setCurrentText("Swept FTIMS")
         elif config.operation_mode == OperationMode.FTIMS:
             self.operation_mode.setCurrentText("Stepped FTIMS")
         else:
-            self.operation_mode.setCurrentText(config.operation_mode.value)
+            # SWEPT_FTIMS and SWEPT_VSIMS are not exposed in the UI; fall back to DTIMS
+            self.operation_mode.setCurrentText("DTIMS")
         self._last_mode_text = self.operation_mode.currentText()
         self.operation_mode.currentTextChanged.connect(self._on_mode_changed)
         # DTIMS controls (timing-based)
