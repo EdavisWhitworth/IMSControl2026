@@ -1,0 +1,11 @@
+Swept VSIMS Timing Diagnostics
+================================================================================
+
+Data points: 4000
+Sample rate: 80000.0 Hz
+Waveform duration (calculated): 50.000 ms
+Configured duration: 50.0 ms
+Gate pulse delay: 100.0 ms
+
+Note: If your external hardware observes >50 ms actual duration,
+the difference is hardware overhead/synchronization time.

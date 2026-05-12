@@ -269,7 +269,9 @@ class ExperimentData:
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self.iterations: List[np.ndarray] = []
         self.iteration_timestamps: List[str] = []
-        
+        # User-supplied environmental/instrument metadata (pressure, temperature, etc.)
+        self.user_params: Dict[str, float] = {}
+
         # For FTIMS mode: store frequency-domain data and FFT-transformed mobility data
         self.frequency_domain_iterations: List[Dict[float, np.ndarray]] = []
         self.frequency_bins: List[float] = []
@@ -288,6 +290,7 @@ class ExperimentData:
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self.iterations.clear()
         self.iteration_timestamps.clear()
+        self.user_params = {}
         self.frequency_domain_iterations.clear()
         self.frequency_bins.clear()
         self.ftims_raw_spectrum_iterations.clear()

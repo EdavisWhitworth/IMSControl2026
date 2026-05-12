@@ -2943,6 +2943,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV (*.csv)")
         if not file_path:
             return
+        self.experiment_data.user_params = self._current_user_params()
         ExperimentExporter.to_csv(file_path, self.experiment_data)
 
     def save_hdf5(self) -> None:
@@ -2952,6 +2953,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save HDF5", "", "HDF5 (*.h5 *.hdf5)")
         if not file_path:
             return
+        self.experiment_data.user_params = self._current_user_params()
         ExperimentExporter.to_hdf5(file_path, self.experiment_data)
 
     def load_hdf5(self) -> None:
@@ -3012,6 +3014,24 @@ class MainWindow(QMainWindow):
         self._update_vsims_optimized_plot()
         if self.plot_tabs is not None:
             self.plot_tabs.setTabVisible(4, self.config.operation_mode == OperationMode.STEPPED_VSIMS)
+        if loaded.user_params:
+            up = loaded.user_params
+            if "pressure_torr" in up and self.pressure_spinbox is not None:
+                self.pressure_spinbox.setValue(up["pressure_torr"])
+            if "temperature_c" in up and self.temperature_spinbox is not None:
+                self.temperature_spinbox.setValue(up["temperature_c"])
+            if "length_cm" in up and self.length_spinbox is not None:
+                self.length_spinbox.setValue(up["length_cm"])
+            if "voltage_kv" in up and self.voltage_spinbox is not None:
+                self.voltage_spinbox.setValue(up["voltage_kv"])
+            if "gate_v_multiplier" in up and self.gate_v_multiplier_spinbox is not None:
+                self.gate_v_multiplier_spinbox.setValue(up["gate_v_multiplier"])
+            if "time_add_ms" in up and self.time_add_spinbox is not None:
+                self.time_add_spinbox.setValue(up["time_add_ms"])
+            if "noise_start_ms" in up and self.noise_start_spinbox is not None:
+                self.noise_start_spinbox.setValue(up["noise_start_ms"])
+            if "noise_end_ms" in up and self.noise_end_spinbox is not None:
+                self.noise_end_spinbox.setValue(up["noise_end_ms"])
         if self.hv_enabled:
             try:
                 self._set_hv_outputs(enabled=True, silent=False)

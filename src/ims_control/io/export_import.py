@@ -42,6 +42,7 @@ class ExperimentExporter:
                     "created_at": experiment.created_at,
                     "config": experiment.config.to_dict(),
                     "iteration_timestamps": experiment.iteration_timestamps,
+                    "user_params": experiment.user_params,
                 },
                 indent=2,
             ),
@@ -96,6 +97,11 @@ class ExperimentExporter:
                         data=np.asarray(fft_bins, dtype=np.float64),
                     )
 
+            if experiment.user_params:
+                up_group = h5.create_group("user_params")
+                for k, v in experiment.user_params.items():
+                    up_group.attrs[k] = float(v)
+
 
 class ExperimentImporter:
     """Reconstruct experiment objects from persisted files."""
@@ -119,6 +125,13 @@ class ExperimentImporter:
 
             exp = ExperimentData(config)
             exp.created_at = str(h5.attrs.get("created_at", exp.created_at))
+
+            up_group = h5.get("user_params")
+            if isinstance(up_group, h5py.Group):
+                exp.user_params = {
+                    k: float(v) for k, v in up_group.attrs.items()
+                }
+
             for key in sorted(h5["iterations"].keys(), key=lambda x: int(x.split("_")[-1])):
                 ds = h5["iterations"][key]
                 exp.add_iteration(np.asarray(ds[:], dtype=np.float64))
