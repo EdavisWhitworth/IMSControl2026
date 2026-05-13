@@ -24,13 +24,43 @@ Python + PyQt5 application for controlling an ion mobility spectrometer acquisit
 - HV OFF sets both AO lines to 0 V, DO line to FALSE, and window background to green.
 - HV settings can be saved to a default JSON file from the HV parameters dialog.
 
+## Requirements
+
+### System Requirements
+- **Windows 10/11** (NI-DAQmx drivers are Windows-only)
+- **Python 3.9 or later** (download from [python.org](https://www.python.org/downloads/))
+- **Visual C++ Redistributable** (required by PyQt5; usually pre-installed on Windows)
+
+### Optional
+- **NI-DAQmx Runtime** (for USB-6351/6341 hardware mode)
+  - Download from [ni.com/downloads](https://www.ni.com/downloads)
+  - If not installed, the application will run in **simulation mode** (no hardware communication)
+- **NI-MAX** (Measurement & Automation Explorer) - useful for verifying device configuration
+
 ## Quick Start
-1. Install Python 3.10+
-2. Install NI-DAQmx driver (for hardware mode)
-3. Install dependencies:
-   - `pip install -r requirements.txt`
-4. Run:
-   - `python -m ims_control.main`
+
+### First Time Setup (Automatic)
+1. Download and install **Python 3.9 or later** from [python.org](https://www.python.org/downloads/)
+   - Ensure "Add Python to PATH" is checked during installation
+2. Clone or extract this repository
+3. **Double-click `setup_env.bat`** in the repository root
+   - This will create a Python virtual environment and install all dependencies
+   - A command window will appear; press any key when setup is complete
+
+### Running the Application
+- **Double-click `Launch-IMSControl.cmd`** to start the application
+
+### Command Line (Advanced)
+If you prefer to run from a terminal:
+```batch
+.venv\Scripts\python.exe -m ims_control.main
+```
+
+Or, after activating the virtual environment:
+```batch
+.venv\Scripts\activate
+imscontrol
+```
 
 ## Hardware Configuration
 
@@ -44,6 +74,30 @@ For USB-6341 devices, configure the following in the Experiment Settings dialog:
 - **PFI Trigger**: e.g., `Dev1/PFI0`
 
 To find your device name, use NI-MAX (Measurement & Automation Explorer) or check the error messages for available channels.
+
+### Troubleshooting Setup Issues
+
+**Python not found in PATH:**
+- Reinstall Python from [python.org](https://www.python.org/downloads/)
+- During installation, **check "Add Python to PATH"** before clicking Install
+- Restart your computer or restart your terminal
+
+**setup_env.bat fails to install dependencies:**
+- Check your internet connection
+- Ensure you have at least 500 MB free disk space
+- If the error mentions "qmake," you may have a PyQt5 build issue
+  - Delete the `.venv` folder and try again
+  - If it persists, contact the development team
+
+### Hardware Fallback Mode
+
+If NI-DAQmx is not installed, the application will run in **simulation mode**:
+- All hardware operations are simulated with realistic timing
+- No physical hardware required
+- Useful for testing and development
+- A message will appear in the status bar or logs indicating simulation mode is active
+
+To use actual hardware, install **NI-DAQmx Runtime** from [ni.com/downloads](https://www.ni.com/downloads).
 
 ### Troubleshooting "Access Violation" Errors
 

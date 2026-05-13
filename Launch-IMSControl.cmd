@@ -1,20 +1,41 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "PYTHON_EXE=%SCRIPT_DIR%.venv\Scripts\python.exe"
 set "PYTHONPATH=%SCRIPT_DIR%src"
+set "SETUP_SCRIPT=%SCRIPT_DIR%setup_env.bat"
 
 if not exist "%PYTHON_EXE%" (
     echo [ERROR] Python virtual environment not found at:
     echo         %PYTHON_EXE%
     echo.
-    echo Create it first, then install requirements:
-    echo   py -m venv .venv
-    echo   .venv\Scripts\python.exe -m pip install -r requirements.txt
-    echo.
-    pause
-    exit /b 1
+    if exist "%SETUP_SCRIPT%" (
+        echo Would you like to set up the environment automatically?
+        echo.
+        set /p RESPONSE="Run setup_env.bat now? (y/n): "
+        if /i "!RESPONSE!"=="y" (
+            call "%SETUP_SCRIPT%"
+            if errorlevel 1 (
+                echo [ERROR] Setup failed. Please fix the errors above and try again.
+                echo.
+                pause
+                exit /b 1
+            )
+        ) else (
+            echo [INFO] Setup skipped. To set up manually, run setup_env.bat
+            echo.
+            pause
+            exit /b 1
+        )
+    ) else (
+        echo Create it first, then install requirements:
+        echo   py -m venv .venv
+        echo   .venv\Scripts\python.exe -m pip install -r requirements.txt
+        echo.
+        pause
+        exit /b 1
+    )
 )
 
 pushd "%SCRIPT_DIR%"

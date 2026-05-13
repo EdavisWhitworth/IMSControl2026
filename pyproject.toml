@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imscontrol"
+version = "0.1.0"
+description = "Python + PyQt5 application for controlling an ion mobility spectrometer acquisition workflow with NI USB-6351 or USB-6341."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "Whitworth University"}
+]
+keywords = ["ion-mobility", "spectrometry", "acquisition", "ni-daqmx", "pyqt5"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+dependencies = [
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.13",
+    "numpy>=1.26",
+    "h5py>=3.10",
+    "pandas>=2.2",
+    "nidaqmx>=0.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+imscontrol = "ims_control.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ims_control = ["py.typed"]

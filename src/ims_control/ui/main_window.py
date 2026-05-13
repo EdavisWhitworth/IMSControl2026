@@ -137,8 +137,9 @@ class MainWindow(QMainWindow):
         self.resize(1500, 780)
 
         self.config = self._load_default_config()
-        self.user_param_defaults = self._load_default_user_params()
+        self._recorded_ims_voltage_kv: float | None = None
         self.hv_config = self._load_default_hv_config()
+        self.user_param_defaults = self._load_default_user_params()
         self.hv_enabled = False
         self.hv_worker: HVOutputWorker | None = None
         self._pending_hv_enabled = False
@@ -177,7 +178,6 @@ class MainWindow(QMainWindow):
         self.pressure_spinbox: QDoubleSpinBox | None = None
         self.temperature_spinbox: QDoubleSpinBox | None = None
         self.length_spinbox: QDoubleSpinBox | None = None
-        self.voltage_label: QLabel | None = None
         self.voltage_spinbox: QDoubleSpinBox | None = None
         self.gate_v_multiplier_spinbox: QDoubleSpinBox | None = None
         self.time_add_spinbox: QDoubleSpinBox | None = None
@@ -348,13 +348,13 @@ class MainWindow(QMainWindow):
         self.length_spinbox.setValue(float(self.user_param_defaults["length_cm"]))
         self.length_spinbox.setSingleStep(0.1)
         self.length_spinbox.setSuffix(" cm")
-        
+
         self.voltage_spinbox = QDoubleSpinBox()
-        self.voltage_spinbox.setDecimals(2)
+        self.voltage_spinbox.setDecimals(3)
         self.voltage_spinbox.setRange(0.1, 100.0)
-        self.voltage_spinbox.setValue(float(self.user_param_defaults["voltage_kv"]))
         self.voltage_spinbox.setSingleStep(0.1)
         self.voltage_spinbox.setSuffix(" kV")
+        self.voltage_spinbox.setValue(float(self.user_param_defaults["voltage_kv"]))
         
         self.gate_v_multiplier_spinbox = QDoubleSpinBox()
         self.gate_v_multiplier_spinbox.setDecimals(2)
@@ -387,8 +387,7 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(self.temperature_spinbox, 1, 1)
         params_layout.addWidget(QLabel("Length"), 2, 0)
         params_layout.addWidget(self.length_spinbox, 2, 1)
-        self.voltage_label = QLabel("Voltage")
-        params_layout.addWidget(self.voltage_label, 3, 0)
+        params_layout.addWidget(QLabel("Voltage"), 3, 0)
         params_layout.addWidget(self.voltage_spinbox, 3, 1)
         params_layout.addWidget(QLabel("Gate V Multiplier"), 4, 0)
         params_layout.addWidget(self.gate_v_multiplier_spinbox, 4, 1)
@@ -688,8 +687,6 @@ class MainWindow(QMainWindow):
             self.selected_swept_fft_plot.setVisible(is_swept_ftims)
         if self.voltage_spinbox is not None:
             self.voltage_spinbox.setVisible(not is_vsims and not is_swept_vsims)
-        if self.voltage_label is not None:
-            self.voltage_label.setVisible(not is_vsims and not is_swept_vsims)
         if self.btn_hv_settings is not None:
             self.btn_hv_settings.setVisible(not is_vsims and not is_swept_vsims)
         if self.btn_subtract_baseline is not None:
@@ -1127,7 +1124,22 @@ class MainWindow(QMainWindow):
                 return float(self._vsims_iteration_voltages[idx])
             if self.config.vsims_config is not None:
                 return float(self.config.vsims_config.initial_voltage_kv)
-        return float(self.voltage_spinbox.value())
+        if self.voltage_spinbox is not None:
+            return float(self.voltage_spinbox.value())
+        return float(self._ims_voltage_kv_for_metadata())
+
+    def _ims_voltage_kv_for_metadata(self) -> float:
+        if self._recorded_ims_voltage_kv is not None:
+            return float(self._recorded_ims_voltage_kv)
+        return float(self.hv_config.ims_setpoint_kv)
+
+    def _set_voltage_from_metadata_default(self) -> None:
+        if self.voltage_spinbox is None:
+            return
+        voltage_kv = self._ims_voltage_kv_for_metadata()
+        self.voltage_spinbox.blockSignals(True)
+        self.voltage_spinbox.setValue(float(voltage_kv))
+        self.voltage_spinbox.blockSignals(False)
 
     def _vsims_row_voltages(self, row_count: int | None = None) -> np.ndarray:
         target_rows = self._heat_row_count if row_count is None else max(0, int(row_count))
@@ -1900,7 +1912,7 @@ class MainWindow(QMainWindow):
             "pressure_torr": 705.0,
             "temperature_c": 20.0,
             "length_cm": 10.0,
-            "voltage_kv": 4.0,
+            "voltage_kv": float(self._ims_voltage_kv_for_metadata()),
             "gate_v_multiplier": 0.5,
             "time_add_ms": 0.0,
             "noise_start_ms": noise_start_default,
@@ -1919,6 +1931,9 @@ class MainWindow(QMainWindow):
             for key in defaults:
                 if key in raw:
                     defaults[key] = float(raw[key])
+
+            if "voltage_kv" not in raw and "ims_voltage_kv" in raw:
+                defaults["voltage_kv"] = float(raw["ims_voltage_kv"])
 
             if "noise_start_ms" not in raw and "noise_end_ms" not in raw:
                 defaults["noise_start_ms"], defaults["noise_end_ms"] = self._default_noise_window()
@@ -1939,6 +1954,7 @@ class MainWindow(QMainWindow):
             "temperature_c": float(self.temperature_spinbox.value()),
             "length_cm": float(self.length_spinbox.value()),
             "voltage_kv": float(self.voltage_spinbox.value()),
+            "ims_voltage_kv": float(self.voltage_spinbox.value()),
             "gate_v_multiplier": float(self.gate_v_multiplier_spinbox.value()),
             "time_add_ms": float(self.time_add_spinbox.value()),
             "noise_start_ms": float(self.noise_start_spinbox.value()),
@@ -2519,6 +2535,9 @@ class MainWindow(QMainWindow):
         dlg = HVConfigDialog(self.hv_config, self)
         if dlg.exec_():
             self.hv_config = dlg.to_config()
+            if self.config.operation_mode in {OperationMode.DTIMS, OperationMode.FTIMS, OperationMode.SWEPT_FTIMS}:
+                self._recorded_ims_voltage_kv = float(self.hv_config.ims_setpoint_kv)
+                self._set_voltage_from_metadata_default()
             if dlg.should_save_as_default():
                 self._save_default_hv_config(self.hv_config)
             if self.hv_enabled:
@@ -2579,6 +2598,11 @@ class MainWindow(QMainWindow):
         self._ftims_atd_time_bins_ms.clear()
         self._swept_raw_iterations.clear()
         self._swept_fft_bins_hz.clear()
+        if self.config.operation_mode in {OperationMode.DTIMS, OperationMode.FTIMS, OperationMode.SWEPT_FTIMS}:
+            self._recorded_ims_voltage_kv = float(self.hv_config.ims_setpoint_kv)
+            self._set_voltage_from_metadata_default()
+        else:
+            self._recorded_ims_voltage_kv = None
         self._clear_baseline_cache()
         if self.ftims_raw_curve is not None:
             self.ftims_raw_curve.setData([], [])
@@ -3014,6 +3038,11 @@ class MainWindow(QMainWindow):
         self._update_vsims_optimized_plot()
         if self.plot_tabs is not None:
             self.plot_tabs.setTabVisible(4, self.config.operation_mode == OperationMode.STEPPED_VSIMS)
+        if self.config.operation_mode in {OperationMode.DTIMS, OperationMode.FTIMS, OperationMode.SWEPT_FTIMS}:
+            self._recorded_ims_voltage_kv = float(self.hv_config.ims_setpoint_kv)
+            self._set_voltage_from_metadata_default()
+        else:
+            self._recorded_ims_voltage_kv = None
         if loaded.user_params:
             up = loaded.user_params
             if "pressure_torr" in up and self.pressure_spinbox is not None:
@@ -3022,8 +3051,11 @@ class MainWindow(QMainWindow):
                 self.temperature_spinbox.setValue(up["temperature_c"])
             if "length_cm" in up and self.length_spinbox is not None:
                 self.length_spinbox.setValue(up["length_cm"])
-            if "voltage_kv" in up and self.voltage_spinbox is not None:
-                self.voltage_spinbox.setValue(up["voltage_kv"])
+            if "ims_voltage_kv" in up:
+                self._recorded_ims_voltage_kv = float(up["ims_voltage_kv"])
+            elif "voltage_kv" in up:
+                self._recorded_ims_voltage_kv = float(up["voltage_kv"])
+            self._set_voltage_from_metadata_default()
             if "gate_v_multiplier" in up and self.gate_v_multiplier_spinbox is not None:
                 self.gate_v_multiplier_spinbox.setValue(up["gate_v_multiplier"])
             if "time_add_ms" in up and self.time_add_spinbox is not None:
