@@ -50,6 +50,11 @@ Python + PyQt5 application for controlling an ion mobility spectrometer acquisit
 ### Running the Application
 - **Double-click `Launch-IMSControl.cmd`** to start the application
 
+### Updating the Repository
+- **Double-click `Update-IMSControl.cmd`** to pull the latest changes from GitHub
+- If you have local edits, the script will stop and ask before pulling
+- After updating, you can optionally refresh dependencies if prompted
+
 ### Command Line (Advanced)
 If you prefer to run from a terminal:
 ```batch
