@@ -64,10 +64,17 @@ class TestFTIMSTransformations:
             frequency_domain[freq] = signal
 
         # Transform to mobility domain
-        mobility_spectrum = _ftims_transform_to_mobility(frequency_domain)
+        mobility_spectrum, atd_time_ms = _ftims_transform_to_mobility(
+            frequency_domain,
+            start_frequency_hz=10.0,
+            frequency_step_hz=5.0,
+            averages_per_iteration=1,
+            experiment_length_ms=50.0,
+        )
 
         # Result should be positive real numbers (FFT magnitude)
         assert np.all(mobility_spectrum >= 0)
+        assert len(atd_time_ms) == len(mobility_spectrum)
         # Should have half the length of input (positive frequencies only)
         assert len(mobility_spectrum) == 50  # 100 / 2
 
@@ -83,7 +90,13 @@ class TestFTIMSTransformations:
             frequency_domain[freq] = signal
             original_energy += np.sum(signal**2)
 
-        mobility_spectrum = _ftims_transform_to_mobility(frequency_domain)
+        mobility_spectrum, atd_time_ms = _ftims_transform_to_mobility(
+            frequency_domain,
+            start_frequency_hz=10.0,
+            frequency_step_hz=10.0,
+            averages_per_iteration=1,
+            experiment_length_ms=50.0,
+        )
 
         # Parseval's theorem: energy in time domain = energy in freq domain
         # (FFT magnitude squared sums to original signal energy)
@@ -93,6 +106,7 @@ class TestFTIMSTransformations:
         # FFT output is not normalized, so check order of magnitude is similar
         assert fft_energy > 0
         assert original_energy > 0
+        assert len(atd_time_ms) == len(mobility_spectrum)
 
 
 class TestHardwareSimulationMode:

@@ -2038,18 +2038,20 @@ class MainWindow(QMainWindow):
     def _time_axis(self, point_count: int) -> np.ndarray:
         """Generate x-axis for plot based on operation mode."""
         if self.config.operation_mode == OperationMode.FTIMS:
-            # Match stepped-FTIMS post-processing axis from attached script.
+            # Match stepped-FTIMS axis mapping used in IMSDataAnalysis.
             start_hz = 10.0
             step_hz = 5.0
+            n_half = max(1, int(point_count))
+            n_pts = max(2, int(n_half * 2))
             if self.config.ftims_config is not None:
                 start_hz = max(1e-9, float(self.config.ftims_config.start_frequency_hz))
                 step_hz = max(1e-9, float(self.config.ftims_config.frequency_step_hz))
             avg_count = max(1, int(self.config.averages_per_iteration))
-            n_half = max(1, int(point_count))
-            n_pts = max(2, 2 * n_half)
-            time_step_s = (1.0 / start_hz) + 0.05
-            sweep_rate_hz_per_s = step_hz / (0.05 + (avg_count / start_hz))
-            xf = np.fft.fftfreq(n_pts, d=time_step_s)[:n_half]
+            dwell_seconds = max(0.0, float(self.config.experiment_length_ms) / 1000.0) + (avg_count / start_hz)
+            if dwell_seconds <= 0.0:
+                dwell_seconds = avg_count / start_hz
+            sweep_rate_hz_per_s = step_hz / dwell_seconds
+            xf = np.fft.fftfreq(n_pts, d=dwell_seconds)[:n_half]
             return (xf / max(1e-9, sweep_rate_hz_per_s)) * 1000.0
         else:
             # For DTIMS, generate time axis in milliseconds

@@ -64,6 +64,7 @@ def _ftims_transform_to_mobility(
     start_frequency_hz: float,
     frequency_step_hz: float,
     averages_per_iteration: int,
+    experiment_length_ms: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Transform stepped-FTIMS raw spectrum to mobility-domain amplitude.
@@ -81,15 +82,21 @@ def _ftims_transform_to_mobility(
     step_hz = max(1e-9, float(frequency_step_hz))
     avg_count = max(1, int(averages_per_iteration))
 
-    # Match attached FTIMS script conventions for display and axis mapping.
-    time_step_s = (1.0 / start_hz) + 0.05
-    sweep_rate_hz_per_s = step_hz / (0.05 + (avg_count / start_hz))
+    # Match IMSDataAnalysis FTIMS ATD mapping: dwell is experiment length +
+    # averages/start-frequency contribution per stepped frequency point.
+    dwell_seconds = max(0.0, float(experiment_length_ms) / 1000.0) + (avg_count / start_hz)
+    if dwell_seconds <= 0.0:
+        dwell_seconds = avg_count / start_hz
+    sweep_rate_hz_per_s = step_hz / dwell_seconds
 
     norm_fac = 2.0 / float(n_pts)
     n_half = max(1, int(n_pts / 2))
+    axis_fft_input_count = max(2, int(n_half * 2))
     yf = np.fft.fft(raw_spectrum)
     amplitude = (np.abs(yf[:n_half]) * norm_fac) ** 2
-    xf = np.fft.fftfreq(n_pts, d=time_step_s)
+    # Keep axis generation consistent with IMSDataAnalysis, which derives the
+    # FFT input point count from the displayed positive-frequency bins.
+    xf = np.fft.fftfreq(axis_fft_input_count, d=dwell_seconds)
     freq_axis = xf[:n_half]
     atd_time_ms = (freq_axis / max(1e-9, sweep_rate_hz_per_s)) * 1000.0
 
@@ -286,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
                     start_frequency_hz=start_freq,
                     frequency_step_hz=freq_step,
                     averages_per_iteration=averages_per_iteration,
+                    experiment_length_ms=float(cfg.experiment_length_ms),
                 )
 
                 # Extract peak metrics for display
